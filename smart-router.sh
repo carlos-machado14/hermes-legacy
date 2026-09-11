@@ -35,10 +35,19 @@ DEFER='[web_search, web_extract, terminal, process_manage, read_file, write_file
 "$HERMES_BIN" config set tools.tool_search.search_default_limit 4 >/dev/null
 "$HERMES_BIN" config set tools.tool_search.max_search_limit 8 >/dev/null
 
-# A compact always-on routing contract. It does not replace Hermes' normal system
-# prompt; it tells the local model how to use progressive disclosure reliably.
-ROUTER_PROMPT='Local capability routing: answer directly when no external state or action is required. For actions, current data, files, terminal, browser, memory, automation, code execution, vision, or session recall, do not guess and do not preload unrelated capabilities. Use tool_search/tool_describe/tool_call to load only the smallest relevant capability. Prefer an installed skill when its domain matches the request, then load only the tools that skill actually needs. For multi-step work, load capabilities sequentially rather than all at once. Ask a clarification only when a required input is missing. Persist durable project knowledge through the local memory/vault skill; never persist secrets.'
-"$HERMES_BIN" config set agent.system_prompt "$ROUTER_PROMPT" >/dev/null
+# Compact always-on routing contract. Preserve any user-owned system_prompt and
+# append our marked router block only once.
+ROUTER_MARKER='[HERMES_LOCAL_SMART_ROUTER]'
+ROUTER_PROMPT="$ROUTER_MARKER Local capability routing: answer directly when no external state or action is required. For actions, current data, files, terminal, browser, memory, automation, code execution, vision, or session recall, do not guess and do not preload unrelated capabilities. Use tool_search/tool_describe/tool_call to load only the smallest relevant capability. Prefer an installed skill when its domain matches the request, then load only the tools that skill actually needs. For multi-step work, load capabilities sequentially rather than all at once. Ask a clarification only when a required input is missing. Persist durable project knowledge through the local memory/vault skill; never persist secrets."
+EXISTING_PROMPT="$("$HERMES_BIN" config get agent.system_prompt 2>/dev/null || true)"
+case "$EXISTING_PROMPT" in
+  ""|null|None) COMBINED_PROMPT="$ROUTER_PROMPT" ;;
+  *"$ROUTER_MARKER"*) COMBINED_PROMPT="$EXISTING_PROMPT" ;;
+  *) COMBINED_PROMPT="$EXISTING_PROMPT
+
+$ROUTER_PROMPT" ;;
+esac
+"$HERMES_BIN" config set agent.system_prompt "$COMBINED_PROMPT" >/dev/null
 
 cat > "$SKILL_DIR/SKILL.md" <<'EOF'
 ---
