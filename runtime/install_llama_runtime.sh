@@ -15,9 +15,15 @@ MODEL_PATH="$MODEL_DIR/$MODEL_FILE"
 MODEL_URL="${HERMES_LOCAL_MODEL_URL:-https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true}"
 MODEL_SHA256="${HERMES_LOCAL_MODEL_SHA256:-7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5}"
 PORT="${HERMES_LOCAL_PORT:-8088}"
-CONTEXT="${HERMES_LOCAL_CONTEXT:-32768}"
+# 16k is the latency/RAM default for the current 8 GB VPS. Qwen3-4B supports a larger
+# native window, but 32k made llama-server page into swap on this machine.
+CONTEXT="${HERMES_LOCAL_CONTEXT:-16384}"
 THREADS="${HERMES_LOCAL_THREADS:-$(nproc 2>/dev/null || echo 4)}"
 BUILD_JOBS="${HERMES_LOCAL_BUILD_JOBS:-$THREADS}"
+BATCH="${HERMES_LOCAL_BATCH:-1024}"
+UBATCH="${HERMES_LOCAL_UBATCH:-256}"
+CACHE_K="${HERMES_LOCAL_CACHE_K:-q8_0}"
+CACHE_V="${HERMES_LOCAL_CACHE_V:-q8_0}"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 SERVICE="$SYSTEMD_DIR/hermes-local-llm.service"
 
@@ -84,11 +90,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 127.0.0.1 --port $PORT --ctx-size $CONTEXT --parallel 1 --threads $THREADS --jinja
+ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 127.0.0.1 --port $PORT --ctx-size $CONTEXT --parallel 1 --threads $THREADS --threads-batch $THREADS --batch-size $BATCH --ubatch-size $UBATCH --cache-type-k $CACHE_K --cache-type-v $CACHE_V --flash-attn auto --cache-prompt --cache-reuse 256 --jinja --chat-template-kwargs '{"enable_thinking":false}'
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
-Nice=5
 
 [Install]
 WantedBy=default.target
@@ -127,3 +132,5 @@ echo "service=hermes-local-llm.service"
 echo "base_url=http://127.0.0.1:$PORT/v1"
 echo "model=$MODEL_ID"
 echo "context=$CONTEXT"
+echo "kv_cache=$CACHE_K/$CACHE_V"
+echo "thinking_default=off"
