@@ -15,12 +15,16 @@ HERMES_BIN="${HERMES_BIN:-$(command -v hermes || true)}"
 PATCH="$SCRIPT_DIR/patches/apply_core_tool_defer_backport.py"
 SMART="$SCRIPT_DIR/smart-router.sh"
 DIAG="$SCRIPT_DIR/diagnose-router.sh"
+HERMES_PY="$HERMES_HOME/hermes-agent/venv/bin/python"
+[[ -x "$HERMES_PY" ]] || HERMES_PY="$(command -v python3 || true)"
+[[ -n "$HERMES_PY" ]] || { echo "Python not found" >&2; exit 1; }
 [[ -f "$PATCH" ]] || { echo "Missing $PATCH" >&2; exit 1; }
 [[ -f "$SMART" ]] || { echo "Missing $SMART" >&2; exit 1; }
 [[ -f "$DIAG" ]] || { echo "Missing $DIAG" >&2; exit 1; }
 
 echo "=== Hermes Smart Router backport ==="
 echo "home=$HERMES_HOME"
+echo "python=$HERMES_PY"
 echo
 
 # Stop only the gateway while Python source is patched. The LLM runtime stays warm.
@@ -31,7 +35,7 @@ rollback_gateway() {
 }
 trap rollback_gateway EXIT
 
-python3 "$PATCH"
+"$HERMES_PY" "$PATCH"
 
 # Apply the config + router skill after the implementation understands defer.
 bash "$SMART"
