@@ -84,7 +84,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 127.0.0.1 --port $PORT --ctx-size $CONTEXT --parallel 1 --threads $THREADS --threads-batch $THREADS --batch-size $BATCH --ubatch-size $UBATCH --cache-type-k $CACHE_K --cache-type-v $CACHE_V --flash-attn auto --cache-prompt --cache-reuse 256 --jinja --chat-template-kwargs '{"enable_thinking":false}'
+ExecStart=$LLAMA_SERVER --model $MODEL_PATH --host 127.0.0.1 --port $PORT --ctx-size $CONTEXT --parallel 1 --threads $THREADS --threads-batch $THREADS --batch-size $BATCH --ubatch-size $UBATCH --cache-type-k $CACHE_K --cache-type-v $CACHE_V --flash-attn auto --cache-prompt --cache-reuse 256 --jinja --reasoning off
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
