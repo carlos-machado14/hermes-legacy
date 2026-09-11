@@ -23,11 +23,11 @@ cp -a "$HERMES_HOME/config.yaml" "$BACKUP/config.yaml"
 echo "[smart-router] backup=$BACKUP"
 
 # Keep only a tiny ambient surface. Everything expensive should be discoverable
-# through Hermes' native progressive-disclosure bridge when the installed build
-# supports explicit core-tool deferral.
+# through Hermes' progressive-disclosure bridge. Include both old and new tool
+# names because this repo supports the user's August build and newer upstream.
 # clarify intentionally stays direct because upstream A/B tests found that
 # deferring it hurts the model's ability to ask for missing information.
-DEFER='[web_search, web_extract, terminal, process_manage, read_file, write_file, patch, search_files, vision_analyze, image_generate, skills_list, skill_view, skill_manage, browser_exec, text_to_speech, todo_list, memory, session_search, execute_code, delegate_task, cronjob_manage, computer_use, manage_connections]'
+DEFER='[web_search, web_extract, terminal, process, process_manage, read_file, write_file, patch, search_files, vision_analyze, image_generate, skills_list, skill_view, skill_manage, browser_exec, text_to_speech, todo, todo_list, memory, session_search, execute_code, delegate_task, cronjob_manage, computer_use, manage_connections]'
 
 "$HERMES_BIN" config set tools.tool_search.enabled on >/dev/null
 "$HERMES_BIN" config set tools.tool_search.defer "$DEFER" >/dev/null
@@ -37,6 +37,13 @@ DEFER='[web_search, web_extract, terminal, process_manage, read_file, write_file
 "$HERMES_BIN" config set tools.tool_search.search_default_limit 4 >/dev/null
 "$HERMES_BIN" config set tools.tool_search.max_search_limit 8 >/dev/null
 
+# Clean up only the router prompt written by the first experimental revision.
+# Never remove a pre-existing/user-owned prompt.
+OLD_PROMPT="$("$HERMES_BIN" config get agent.system_prompt 2>/dev/null || true)"
+if [[ "$OLD_PROMPT" == \[HERMES_LOCAL_SMART_ROUTER\]* ]]; then
+  "$HERMES_BIN" config unset agent.system_prompt >/dev/null 2>&1 || true
+fi
+
 # The routing contract lives in a skill, not agent.system_prompt. Keeping it here
 # avoids inflating every turn and avoids changing any user-owned personality or
 # system-prompt configuration.
@@ -44,7 +51,7 @@ cat > "$SKILL_DIR/SKILL.md" <<'EOF'
 ---
 name: hermes-smart-router
 description: Route each request to the smallest relevant Hermes skill or capability, keeping local-model prompts small and actions reliable.
-version: 1.1.0
+version: 1.2.0
 platforms: [linux]
 metadata:
   hermes:
