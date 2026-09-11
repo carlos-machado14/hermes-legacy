@@ -152,74 +152,35 @@ done
 
 # Migra pins POR JOB existentes. Isso é necessário porque um job criado/editado com
 # --provider "OmniRoute NGC" --model combo-free continua usando esse pin mesmo após trocar
-# o default global. Fazemos a edição diretamente no store, preservando IDs, agenda, prompt,
-# histórico e estado do job.
+# o default global. Usamos a CLI oficial para respeitar o lock do scheduler e preservar
+# IDs, agenda, prompt, histórico e estado do job.
 JOBS_FILE="$HERMES_HOME/cron/jobs.json"
 if [[ -f "$JOBS_FILE" ]]; then
   log "Migrando pins das rotinas existentes para custom/$MODEL..."
-  if [[ "${EUID:-$(id -u)}" -eq 0 && "$TARGET_USER" != "root" ]]; then
-    sudo -u "$TARGET_USER" -H env JOBS_FILE="$JOBS_FILE" LOCAL_MODEL="$MODEL" python3 - <<'PY'
-import json, os, pathlib, tempfile
-p = pathlib.Path(os.environ['JOBS_FILE'])
-model = os.environ['LOCAL_MODEL']
-data = json.loads(p.read_text(encoding='utf-8'))
-count = 0
-
+  mapfile -t JOB_IDS < <(JOBS_FILE="$JOBS_FILE" python3 - <<'PYJ'
+import json, os
+data=json.load(open(os.environ['JOBS_FILE'], encoding='utf-8'))
+seen=set()
 def walk(node):
-    global count
     if isinstance(node, dict):
-        if node.get('job_id'):
-            node['model'] = model
-            node['model_provider'] = 'custom'
-            count += 1
-        for value in node.values():
-            walk(value)
-    elif isinstance(node, list):
-        for value in node:
-            walk(value)
-
-walk(data)
-text = json.dumps(data, ensure_ascii=False, indent=2) + '\n'
-fd, tmp = tempfile.mkstemp(prefix='.jobs.local-only.', dir=str(p.parent), text=True)
-try:
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.write(text)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-finally:
-    if os.path.exists(tmp): os.unlink(tmp)
-print(count)
-PY
-  else
-    JOBS_FILE="$JOBS_FILE" LOCAL_MODEL="$MODEL" python3 - <<'PY'
-import json, os, pathlib, tempfile
-p = pathlib.Path(os.environ['JOBS_FILE'])
-model = os.environ['LOCAL_MODEL']
-data = json.loads(p.read_text(encoding='utf-8'))
-count = 0
-
-def walk(node):
-    global count
-    if isinstance(node, dict):
-        if node.get('job_id'):
-            node['model'] = model
-            node['model_provider'] = 'custom'
-            count += 1
+        jid=node.get('job_id')
+        if jid and jid not in seen:
+            seen.add(jid); print(jid)
         for value in node.values(): walk(value)
     elif isinstance(node, list):
         for value in node: walk(value)
 walk(data)
-fd, tmp = tempfile.mkstemp(prefix='.jobs.local-only.', dir=str(p.parent), text=True)
-try:
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.write(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-finally:
-    if os.path.exists(tmp): os.unlink(tmp)
-print(count)
-PY
-  fi
+PYJ
+)
+  migrated=0
+  for job_id in "${JOB_IDS[@]}"; do
+    if run_as_target "$HERMES_BIN" cron edit "$job_id" --provider custom --model "$MODEL" >/dev/null; then
+      migrated=$((migrated + 1))
+    else
+      die "Falha ao migrar a rotina $job_id. Backup preservado em $BACKUP_DIR. Interrompi para não deixar migração parcial silenciosa."
+    fi
+  done
+  log "Rotinas migradas: $migrated"
 else
   warn "Nenhum $JOBS_FILE encontrado; não há rotinas persistidas nesse HERMES_HOME ou elas usam outro profile."
 fi
@@ -239,6 +200,7 @@ Environment="OLLAMA_KEEP_ALIVE=10m"
 SYS
     systemctl daemon-reload
     systemctl restart ollama
+    # aguarda endpoint voltar sem falhar a instalação por startup lento
     for _ in {1..30}; do
       curl -fsS --max-time 2 "${BASE_URL%/}/models" >/dev/null 2>&1 && break
       sleep 2
