@@ -6,6 +6,7 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 export HERMES_HOME
 HERMES_BIN="${HERMES_BIN:-$(command -v hermes || true)}"
@@ -21,10 +22,11 @@ cp -a "$HERMES_HOME/config.yaml" "$BACKUP/config.yaml"
 
 echo "[smart-router] backup=$BACKUP"
 
-# Keep only a tiny ambient surface. Everything expensive is discoverable through
-# Hermes' native progressive-disclosure bridge (tool_search/tool_describe/tool_call).
-# clarify intentionally stays direct because upstream A/B tests found that deferring
-# it hurts the model's ability to ask a user for missing information.
+# Keep only a tiny ambient surface. Everything expensive should be discoverable
+# through Hermes' native progressive-disclosure bridge when the installed build
+# supports explicit core-tool deferral.
+# clarify intentionally stays direct because upstream A/B tests found that
+# deferring it hurts the model's ability to ask for missing information.
 DEFER='[web_search, web_extract, terminal, process_manage, read_file, write_file, patch, search_files, vision_analyze, image_generate, skills_list, skill_view, skill_manage, browser_exec, text_to_speech, todo_list, memory, session_search, execute_code, delegate_task, cronjob_manage, computer_use, manage_connections]'
 
 "$HERMES_BIN" config set tools.tool_search.enabled on >/dev/null
@@ -35,25 +37,14 @@ DEFER='[web_search, web_extract, terminal, process_manage, read_file, write_file
 "$HERMES_BIN" config set tools.tool_search.search_default_limit 4 >/dev/null
 "$HERMES_BIN" config set tools.tool_search.max_search_limit 8 >/dev/null
 
-# Compact always-on routing contract. Preserve any user-owned system_prompt and
-# append our marked router block only once.
-ROUTER_MARKER='[HERMES_LOCAL_SMART_ROUTER]'
-ROUTER_PROMPT="$ROUTER_MARKER Local capability routing: answer directly when no external state or action is required. For actions, current data, files, terminal, browser, memory, automation, code execution, vision, or session recall, do not guess and do not preload unrelated capabilities. Use tool_search/tool_describe/tool_call to load only the smallest relevant capability. Prefer an installed skill when its domain matches the request, then load only the tools that skill actually needs. For multi-step work, load capabilities sequentially rather than all at once. Ask a clarification only when a required input is missing. Persist durable project knowledge through the local memory/vault skill; never persist secrets."
-EXISTING_PROMPT="$("$HERMES_BIN" config get agent.system_prompt 2>/dev/null || true)"
-case "$EXISTING_PROMPT" in
-  ""|null|None) COMBINED_PROMPT="$ROUTER_PROMPT" ;;
-  *"$ROUTER_MARKER"*) COMBINED_PROMPT="$EXISTING_PROMPT" ;;
-  *) COMBINED_PROMPT="$EXISTING_PROMPT
-
-$ROUTER_PROMPT" ;;
-esac
-"$HERMES_BIN" config set agent.system_prompt "$COMBINED_PROMPT" >/dev/null
-
+# The routing contract lives in a skill, not agent.system_prompt. Keeping it here
+# avoids inflating every turn and avoids changing any user-owned personality or
+# system-prompt configuration.
 cat > "$SKILL_DIR/SKILL.md" <<'EOF'
 ---
 name: hermes-smart-router
 description: Route each request to the smallest relevant Hermes skill or capability, keeping local-model prompts small and actions reliable.
-version: 1.0.0
+version: 1.1.0
 platforms: [linux]
 metadata:
   hermes:
@@ -108,8 +99,11 @@ printf 'tool_search.defer='; "$HERMES_BIN" config get tools.tool_search.defer ||
 printf 'router_skill=%s\n' "$SKILL_DIR/SKILL.md"
 echo
 
-echo '[smart-router] prompt-size after routing:'
-"$HERMES_BIN" prompt-size || true
+if [[ -f "$SCRIPT_DIR/diagnose-router.sh" ]]; then
+  bash "$SCRIPT_DIR/diagnose-router.sh"
+else
+  echo "diagnose-router.sh not found; run git pull and retry."
+fi
 
 echo
-echo "Smart Router enabled. Backup: $BACKUP"
+echo "Smart Router configured. Backup: $BACKUP"
