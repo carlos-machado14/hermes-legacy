@@ -54,6 +54,15 @@ set_optional agent.execution_guidance false
 set_optional agent.environment_probe false
 set_optional agent.bot_mode_protocol false
 
+# A CPU-only single-slot local model must prioritize the foreground answer.
+# Hermes auto-title generation performs an extra auxiliary LLM call for new
+# sessions; background review can perform another post-turn model/tool pass.
+# Both features are useful on cheap/fast remote models but add latency and can
+# contend with the only llama.cpp slot here. Persistent memory itself remains
+# enabled and can still be used explicitly through the deferred memory tool.
+set_optional auxiliary.title_generation.enabled false
+set_optional auxiliary.background_review.enabled false
+
 # Keep memory + USER profile enabled: together they are only ~2 KB and are
 # valuable persistent context. Keep the user's SOUL/identity untouched.
 
@@ -75,4 +84,4 @@ fi
 
 echo
 echo "Compact local prompt enabled. Backup: $BACKUP"
-echo "Do not run an LLM test yet; compare the prompt-size output first."
+echo "Auxiliary title generation and background review are disabled for foreground latency."
