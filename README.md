@@ -64,12 +64,13 @@ Nunca rode o instalador completo como root. Rode como o mesmo usuário que execu
 ```bash
 cd ~/hermes-local-only
 git pull
-chmod +x *.sh runtime/*.sh vault/*.sh
 
-./inspect.sh
-./install-full.sh
-./verify.sh
+bash ./inspect.sh
+bash ./install-full.sh
+bash ./verify.sh
 ```
+
+> Execute os scripts com `bash` em vez de alterar o bit executável com `chmod +x`. Isso mantém o working tree limpo e evita conflitos futuros no `git pull`.
 
 `install-full.sh` usa `sudo` somente se precisar instalar `build-essential`, `cmake`, `git`, `curl` ou certificados do sistema.
 
@@ -122,7 +123,7 @@ Use:
 ```bash
 cd ~/hermes-local-only
 git pull
-./update-local.sh
+bash ./update-local.sh
 ```
 
 O fluxo é:
@@ -142,8 +143,8 @@ Assim não mantemos milhares de commits divergentes do upstream.
 ## Diagnóstico
 
 ```bash
-./inspect.sh
-./verify.sh
+bash ./inspect.sh
+bash ./verify.sh
 
 systemctl --user status hermes-local-llm.service
 journalctl --user -u hermes-local-llm.service -f
@@ -163,7 +164,7 @@ Cada migração completa cria um snapshot em:
 Para restaurar o último estado:
 
 ```bash
-./rollback.sh
+bash ./rollback.sh
 ```
 
 O rollback restaura configuração, cron e o fonte original do Hermes e desativa o runtime local. O modelo e o vault permanecem em disco para não apagar dados desnecessariamente.
