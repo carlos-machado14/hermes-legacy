@@ -34,12 +34,11 @@ LISTEN_PORT = int(os.getenv("HERMES_FAST_ROUTER_PORT", "8089"))
 BACKEND = os.getenv("HERMES_FAST_ROUTER_BACKEND", "http://127.0.0.1:8088").rstrip("/")
 TIMEOUT = float(os.getenv("HERMES_FAST_ROUTER_TIMEOUT", "1800"))
 
+# Keep the cached prefix intentionally tiny. The user's own request carries the
+# desired language/style; repeated direct turns should reuse this prefix in llama.cpp.
 DIRECT_SYSTEM = (
-    "You are Hermes, a helpful local AI assistant. Answer directly in the user's language. "
-    "Follow the user's requested output format literally. If the user says somente, apenas, only, "
-    "just, one word, or otherwise asks for only a specific value, output only that requested value "
-    "with no explanation, preface, or extra facts. Be accurate and concise. Never claim current data, "
-    "file access, tool use, or actions you did not perform."
+    "You are Hermes. Answer accurately and concisely in the user's language. "
+    "Follow requested output format exactly. Never invent current data, tool use, or actions."
 )
 
 AGENT_SYSTEM = (
@@ -57,7 +56,6 @@ _CONTEXTUAL_HINTS = (
     "that", "this", "previous", "above", "as i said", "continue", "same one",
 )
 
-# Requests matching these concepts require fresh/current state rather than model memory.
 _CURRENT_RE = re.compile(
     r"\b(hoje|agora|atual(?:mente)?|recent(?:e|es|emente)?|últim[oa]s?|ultim[oa]s?|"
     r"latest|today|current|now|weather|clima|previs[aã]o do tempo|d[oó]lar|euro|cota[cç][aã]o|"
@@ -66,7 +64,6 @@ _CURRENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Explicit request to use/access/modify an external capability.
 _ACTION_RE = re.compile(
     r"\b(pesquis(?:e|ar)|busqu(?:e|ar)|procure|consulte|acesse|abra|abrir|clique|clicar|"
     r"execute|executar|rode|rodar|edite|editar|altere|alterar|modifique|modificar|"
@@ -157,7 +154,6 @@ def _depends_on_history(text: str) -> bool:
 
 
 def _route_heuristic(messages: list[dict[str, Any]], user_text: str) -> tuple[str, str]:
-    """Return (DIRECT|AGENT, reason) without another model invocation."""
     if not user_text:
         return "AGENT", "empty-user"
     if _has_non_text_user_content(messages):
@@ -170,22 +166,7 @@ def _route_heuristic(messages: list[dict[str, Any]], user_text: str) -> tuple[st
         return "AGENT", "private-state"
     if _ACTION_RE.search(user_text) and _CAPABILITY_RE.search(user_text):
         return "AGENT", "external-action"
-    # Explicit capability names without an action are often questions ABOUT the concept
-    # (e.g. "o que é Docker?") and can be answered directly. Default DIRECT when no
-    # evidence of fresh/private state or an action exists.
     return "DIRECT", "knowledge"
-
-
-def _backend_json(payload: dict[str, Any], timeout: float = TIMEOUT) -> dict[str, Any]:
-    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        BACKEND + "/v1/chat/completions",
-        data=raw,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
 
 
 def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
@@ -197,13 +178,16 @@ def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
     out.pop("tools", None)
     out.pop("tool_choice", None)
     out.pop("parallel_tool_calls", None)
-    # Make literal short-format requests cheap and deterministic. Do not cap normal
-    # writing/explanation prompts because they may legitimately require long output.
+
+    # Prevent a CPU-local model from turning a simple direct question into a
+    # long monologue. Normal DIRECT answers are bounded; explicit short-format
+    # requests get an even tighter cap.
+    current = out.get("max_tokens")
+    if not isinstance(current, int) or current <= 0:
+        current = 128
+    out["max_tokens"] = min(current, 128)
     if _STRICT_OUTPUT_RE.search(user_text):
-        current = out.get("max_tokens")
-        if not isinstance(current, int) or current <= 0:
-            current = 24
-        out["max_tokens"] = min(current, 24)
+        out["max_tokens"] = min(out["max_tokens"], 12)
         out["temperature"] = 0
     return out
 
@@ -216,18 +200,30 @@ def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesFastRouter/2.0"
+    server_version = "HermesFastRouter/3.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stdout.write("[fast-router] " + (fmt % args) + "\n")
         sys.stdout.flush()
 
+    def _safe_write(self, data: bytes) -> bool:
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            # Common when `timeout`, Ctrl-C, or a short-lived oneshot process
+            # closes its side after the useful foreground answer completed.
+            self.close_connection = True
+            return False
+
     def _relay(self, url: str, body: bytes | None = None, content_type: str | None = None) -> None:
         headers = {}
         if content_type:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=body, headers=headers, method="POST" if body is not None else "GET")
+        upstream_started = time.monotonic()
         try:
             resp = urllib.request.urlopen(req, timeout=TIMEOUT)
         except urllib.error.HTTPError as exc:
@@ -236,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", exc.headers.get("Content-Type", "application/json"))
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            self._safe_write(data)
             return
         with resp:
             ctype = resp.headers.get("Content-Type", "application/json")
@@ -249,25 +245,24 @@ class Handler(BaseHTTPRequestHandler):
                 data = resp.read()
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                self._safe_write(data)
             else:
                 self.end_headers()
                 while True:
                     chunk = resp.read(4096)
-                    if not chunk:
+                    if not chunk or not self._safe_write(chunk):
                         break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
             self.close_connection = True
+        self.log_message("upstream_ms=%d", int((time.monotonic() - upstream_started) * 1000))
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            data = json.dumps({"ok": True, "backend": BACKEND, "router_version": 2}).encode()
+            data = json.dumps({"ok": True, "backend": BACKEND, "router_version": 3}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            self._safe_write(data)
             return
         self._relay(BACKEND + self.path)
 
@@ -287,14 +282,11 @@ class Handler(BaseHTTPRequestHandler):
         tools = payload.get("tools") or []
         started = time.monotonic()
 
-        # No Hermes tool surface: already compact/direct (auxiliary tasks, smoke tests,
-        # or callers using the endpoint directly). Proxy unchanged.
         if not tools:
             self.log_message("route=PASSTHROUGH no-tools")
             self._relay(BACKEND + self.path, raw, "application/json")
             return
 
-        # After a tool call preserve the agent loop. Never re-route a continuation.
         if _is_continuation(messages):
             routed = _agent_payload(payload)
             self.log_message("route=AGENT reason=continuation compact-system")
@@ -316,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    print(f"[fast-router] version=2 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
+    print(f"[fast-router] version=3 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
