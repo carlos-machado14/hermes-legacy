@@ -11,7 +11,9 @@ export HERMES_HOME
 HERMES_BIN="${HERMES_BIN:-$(command -v hermes || true)}"
 [[ -n "$HERMES_BIN" ]] || { echo "Hermes CLI not found" >&2; exit 1; }
 
-CONTEXT="${HERMES_FAST_CONTEXT:-16384}"
+# 16k is too small for a full Hermes installation with its normal tool schemas.
+# Keep the model's native 32k window and save RAM through quantized KV cache instead.
+CONTEXT="${HERMES_FAST_CONTEXT:-32768}"
 MIN_CONTEXT="${HERMES_FAST_MIN_CONTEXT:-8192}"
 PORT="${HERMES_LOCAL_PORT:-8088}"
 THREADS="${HERMES_LOCAL_THREADS:-$(nproc 2>/dev/null || echo 4)}"
@@ -19,6 +21,10 @@ BATCH="${HERMES_LOCAL_BATCH:-1024}"
 UBATCH="${HERMES_LOCAL_UBATCH:-256}"
 CACHE_K="${HERMES_LOCAL_CACHE_K:-q8_0}"
 CACHE_V="${HERMES_LOCAL_CACHE_V:-q8_0}"
+
+# Compression profile for a 32k local window. These can still be overridden.
+COMPRESSION_THRESHOLD="${HERMES_FAST_COMPRESSION_THRESHOLD:-24000}"
+PRUNE_THRESHOLD="${HERMES_FAST_PRUNE_THRESHOLD:-18000}"
 
 RUNTIME_ROOT="$HERMES_HOME/local-runtime"
 LLAMA_SERVER="$RUNTIME_ROOT/llama.cpp/build/bin/llama-server"
@@ -42,7 +48,8 @@ cp -a "$SERVICE" "$BACKUP/hermes-local-llm.service"
 cp -a "$HERMES_HOME/config.yaml" "$BACKUP/config.yaml" 2>/dev/null || true
 cp -a "$ENV_FILE" "$BACKUP/.env" 2>/dev/null || true
 cp -a "$DROPIN" "$BACKUP/local-only.conf" 2>/dev/null || true
-printf 'created_at=%s\ncontext=%s\nmin_context=%s\n' "$STAMP" "$CONTEXT" "$MIN_CONTEXT" > "$BACKUP/metadata.txt"
+printf 'created_at=%s\ncontext=%s\nmin_context=%s\ncompression_threshold=%s\nprune_threshold=%s\n' \
+  "$STAMP" "$CONTEXT" "$MIN_CONTEXT" "$COMPRESSION_THRESHOLD" "$PRUNE_THRESHOLD" > "$BACKUP/metadata.txt"
 log "Backup: $BACKUP"
 
 upsert_env(){
@@ -106,13 +113,13 @@ Environment=HERMES_LOCAL_STREAM_STALE_TIMEOUT=900
 Environment=HERMES_CRON_TIMEOUT=1800
 EOF
 
-log "Applying Hermes small-context profile"
+log "Applying Hermes local-context profile"
 "$HERMES_BIN" config set model.context_length "$CONTEXT"
 "$HERMES_BIN" config set compression.enabled true >/dev/null 2>&1 || true
-"$HERMES_BIN" config set compression.threshold_tokens 10000 >/dev/null 2>&1 || true
-"$HERMES_BIN" config set compression.proactive_prune_tokens 7000 >/dev/null 2>&1 || true
-"$HERMES_BIN" config set compression.proactive_prune_min_reclaim_tokens 1024 >/dev/null 2>&1 || true
-"$HERMES_BIN" config set compression.protect_last_n 8 >/dev/null 2>&1 || true
+"$HERMES_BIN" config set compression.threshold_tokens "$COMPRESSION_THRESHOLD" >/dev/null 2>&1 || true
+"$HERMES_BIN" config set compression.proactive_prune_tokens "$PRUNE_THRESHOLD" >/dev/null 2>&1 || true
+"$HERMES_BIN" config set compression.proactive_prune_min_reclaim_tokens 2048 >/dev/null 2>&1 || true
+"$HERMES_BIN" config set compression.protect_last_n 10 >/dev/null 2>&1 || true
 "$HERMES_BIN" config set compression.max_attempts 5 >/dev/null 2>&1 || true
 "$HERMES_BIN" config set streaming.enabled true >/dev/null 2>&1 || true
 
@@ -167,6 +174,8 @@ ELAPSED=$((END-START))
 echo
 printf 'context=%s\n' "$CONTEXT"
 printf 'minimum_context=%s\n' "$MIN_CONTEXT"
+printf 'compression_threshold=%s\n' "$COMPRESSION_THRESHOLD"
+printf 'prune_threshold=%s\n' "$PRUNE_THRESHOLD"
 printf 'kv_cache=%s/%s\n' "$CACHE_K" "$CACHE_V"
 printf 'thinking_default=off\n'
 printf 'streaming=enabled\n'
