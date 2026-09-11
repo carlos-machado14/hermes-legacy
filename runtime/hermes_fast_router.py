@@ -13,6 +13,10 @@ DIRECT: tiny system prompt + latest user message, no tools.
 AGENT: compact local-agent contract + Hermes' progressive-disclosure bridge tools.
 Tool continuations always stay on AGENT.
 
+/v1/route exposes the same deterministic decision without running the model. This
+lets `hermes -z` decide before constructing AIAgent and skip most CLI startup work
+for simple requests.
+
 All inference remains local on the same llama.cpp runtime.
 """
 
@@ -34,8 +38,6 @@ LISTEN_PORT = int(os.getenv("HERMES_FAST_ROUTER_PORT", "8089"))
 BACKEND = os.getenv("HERMES_FAST_ROUTER_BACKEND", "http://127.0.0.1:8088").rstrip("/")
 TIMEOUT = float(os.getenv("HERMES_FAST_ROUTER_TIMEOUT", "1800"))
 
-# Keep the cached prefix intentionally tiny. The user's own request carries the
-# desired language/style; repeated direct turns should reuse this prefix in llama.cpp.
 DIRECT_SYSTEM = (
     "You are Hermes. Answer accurately and concisely in the user's language. "
     "Follow requested output format exactly. Never invent current data, tool use, or actions."
@@ -88,6 +90,15 @@ _PRIVATE_POSSESSIVE_RE = re.compile(
     r"servidor|server|vps|configura[cç][aã]o|config|email|drive|agenda|calendar|"
     r"mem[oó]ria|memory|conversa|chat|sess[aã]o|session)\b",
     re.IGNORECASE | re.DOTALL,
+)
+
+# Personal facts/preferences and explicit remembering must go through the agent so
+# Hermes can persist them instead of silently answering on the stateless DIRECT path.
+_MEMORY_INTENT_RE = re.compile(
+    r"\b(lembre|lembra|lembrar|guarde|guardar|memorize|memorizar|anote|anotar|"
+    r"meu nome (?:é|e)|me chamo|eu prefiro|minha prefer[eê]ncia|"
+    r"remember|save this|my name is|i prefer|my preference)\b",
+    re.IGNORECASE,
 )
 
 _STRICT_OUTPUT_RE = re.compile(
@@ -160,6 +171,8 @@ def _route_heuristic(messages: list[dict[str, Any]], user_text: str) -> tuple[st
         return "AGENT", "non-text-input"
     if _depends_on_history(user_text):
         return "AGENT", "history-reference"
+    if _MEMORY_INTENT_RE.search(user_text):
+        return "AGENT", "memory-intent"
     if _CURRENT_RE.search(user_text):
         return "AGENT", "current-state"
     if _PRIVATE_POSSESSIVE_RE.search(user_text):
@@ -179,9 +192,6 @@ def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
     out.pop("tool_choice", None)
     out.pop("parallel_tool_calls", None)
 
-    # Prevent a CPU-local model from turning a simple direct question into a
-    # long monologue. Normal DIRECT answers are bounded; explicit short-format
-    # requests get an even tighter cap.
     current = out.get("max_tokens")
     if not isinstance(current, int) or current <= 0:
         current = 128
@@ -200,7 +210,7 @@ def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesFastRouter/3.0"
+    server_version = "HermesFastRouter/4.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -213,10 +223,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             return True
         except (BrokenPipeError, ConnectionResetError):
-            # Common when `timeout`, Ctrl-C, or a short-lived oneshot process
-            # closes its side after the useful foreground answer completed.
             self.close_connection = True
             return False
+
+    def _json_response(self, status: int, payload: dict[str, Any]) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self._safe_write(data)
 
     def _relay(self, url: str, body: bytes | None = None, content_type: str | None = None) -> None:
         headers = {}
@@ -257,25 +273,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            data = json.dumps({"ok": True, "backend": BACKEND, "router_version": 3}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self._safe_write(data)
+            self._json_response(200, {"ok": True, "backend": BACKEND, "router_version": 4})
             return
         self._relay(BACKEND + self.path)
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0") or 0)
         raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            self._json_response(400, {"error": "invalid JSON"})
+            return
+
+        # Deterministic, model-free route probe for the CLI pre-agent fast path.
+        if self.path in {"/route", "/v1/route"}:
+            text = str(payload.get("text") or payload.get("prompt") or "").strip()
+            messages = [{"role": "user", "content": text}]
+            route, reason = _route_heuristic(messages, text)
+            self.log_message("route-probe=%s reason=%s chars=%d", route, reason, len(text))
+            self._json_response(200, {"route": route, "reason": reason, "router_version": 4})
+            return
+
         if self.path != "/v1/chat/completions":
             self._relay(BACKEND + self.path, raw, self.headers.get("Content-Type", "application/json"))
-            return
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except Exception:
-            self.send_error(400, "invalid JSON")
             return
 
         messages = payload.get("messages") or []
@@ -308,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    print(f"[fast-router] version=3 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
+    print(f"[fast-router] version=4 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
