@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Hermes local fast-path OpenAI-compatible proxy.
 
-It keeps llama.cpp on the private backend port and exposes a second local endpoint
-for Hermes. A tiny local classifier decides whether the latest user request can be
-answered directly or needs the full Hermes agent/tool loop.
+The proxy keeps llama.cpp private on the backend port and exposes a second local
+endpoint for Hermes. Requests that clearly do not need tools take a minimal DIRECT
+path; requests that need current/private state or actions keep the Hermes agent path.
 
-DIRECT: send only a tiny system prompt + latest user message to llama.cpp.
-AGENT: keep Hermes' three bridge tools, but replace the large system prompt with a
-compact local-agent contract. Tool results/continuation turns skip classification
-and stay on the AGENT path.
+Routing is deterministic by default. On a small CPU VPS an LLM classifier costs an
+extra generation before every answer, so using the same 4B model just to decide
+DIRECT vs AGENT defeats the purpose of the fast path.
 
-No external provider is used. All inference stays on the same local llama.cpp model.
+DIRECT: tiny system prompt + latest user message, no tools.
+AGENT: compact local-agent contract + Hermes' progressive-disclosure bridge tools.
+Tool continuations always stay on AGENT.
+
+All inference remains local on the same llama.cpp runtime.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -30,19 +34,12 @@ LISTEN_PORT = int(os.getenv("HERMES_FAST_ROUTER_PORT", "8089"))
 BACKEND = os.getenv("HERMES_FAST_ROUTER_BACKEND", "http://127.0.0.1:8088").rstrip("/")
 TIMEOUT = float(os.getenv("HERMES_FAST_ROUTER_TIMEOUT", "1800"))
 
-ROUTER_SYSTEM = (
-    "Classify the user's request for a local AI assistant. Reply exactly DIRECT if it can be "
-    "answered from general model knowledge, reasoning, writing, translation, or conversation "
-    "without any external/private/current state or action. Reply exactly AGENT if it needs web "
-    "or current data, files, terminal/processes, code execution, browser interaction, memory or "
-    "past sessions, scheduling/cron, devices/connections, image analysis/generation, or any tool. "
-    "If the request depends on earlier conversation context that is not present, reply AGENT. "
-    "If uncertain, reply AGENT. Output one word only."
-)
-
 DIRECT_SYSTEM = (
     "You are Hermes, a helpful local AI assistant. Answer directly in the user's language. "
-    "Be accurate and concise. Do not claim current data, file access, tool use, or actions you did not perform."
+    "Follow the user's requested output format literally. If the user says somente, apenas, only, "
+    "just, one word, or otherwise asks for only a specific value, output only that requested value "
+    "with no explanation, preface, or extra facts. Be accurate and concise. Never claim current data, "
+    "file access, tool use, or actions you did not perform."
 )
 
 AGENT_SYSTEM = (
@@ -58,6 +55,48 @@ _CONTEXTUAL_HINTS = (
     "isso", "isto", "aquilo", "esse", "essa", "esses", "essas", "anterior", "antes", "acima",
     "como falei", "como disse", "como combinamos", "continue", "continua", "de novo", "o mesmo",
     "that", "this", "previous", "above", "as i said", "continue", "same one",
+)
+
+# Requests matching these concepts require fresh/current state rather than model memory.
+_CURRENT_RE = re.compile(
+    r"\b(hoje|agora|atual(?:mente)?|recent(?:e|es|emente)?|últim[oa]s?|ultim[oa]s?|"
+    r"latest|today|current|now|weather|clima|previs[aã]o do tempo|d[oó]lar|euro|cota[cç][aã]o|"
+    r"c[aâ]mbio|not[ií]cias?|news|placar|score|tr[aâ]nsito|traffic|pre[cç]o atual|valor atual|"
+    r"disponibilidade|availability|status do voo|flight status)\b",
+    re.IGNORECASE,
+)
+
+# Explicit request to use/access/modify an external capability.
+_ACTION_RE = re.compile(
+    r"\b(pesquis(?:e|ar)|busqu(?:e|ar)|procure|consulte|acesse|abra|abrir|clique|clicar|"
+    r"execute|executar|rode|rodar|edite|editar|altere|alterar|modifique|modificar|"
+    r"leia|ler|salve|salvar|grave|gravar|baixe|baixar|fa[cç]a upload|upload|download|"
+    r"agende|agendar|lembre|lembrar|crie um lembrete|criar um lembrete|"
+    r"envie|enviar|mande|mandar|use (?:uma |a )?ferramenta|use tool|"
+    r"search|browse|open|click|run|execute|read|write|edit|save|schedule|remind|send)\b",
+    re.IGNORECASE,
+)
+
+_CAPABILITY_RE = re.compile(
+    r"\b(web|internet|google|site|url|arquivo|arquivos|file|files|pasta|folder|terminal|shell|"
+    r"processo|process|hostname|servidor|server|vps|docker|github|repo|reposit[oó]rio|"
+    r"mem[oó]ria|memory|sess[aã]o|session|cron|agenda|calendar|browser|navegador|"
+    r"imagem|image|foto|photo|screenshot|email|e-mail|drive|conex[aã]o|connection|"
+    r"dispositivo|device|banco de dados|database|db)\b",
+    re.IGNORECASE,
+)
+
+_PRIVATE_POSSESSIVE_RE = re.compile(
+    r"\b(meu|minha|meus|minhas|my)\b.{0,40}\b(arquivo|file|projeto|project|repo|reposit[oó]rio|"
+    r"servidor|server|vps|configura[cç][aã]o|config|email|drive|agenda|calendar|"
+    r"mem[oó]ria|memory|conversa|chat|sess[aã]o|session)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_STRICT_OUTPUT_RE = re.compile(
+    r"\b(somente|apenas|s[oó]|only|just|one word|uma palavra|sem explica[cç][aã]o|"
+    r"sem texto extra|no explanation|nothing else)\b",
+    re.IGNORECASE,
 )
 
 
@@ -76,11 +115,31 @@ def _content_text(content: Any) -> str:
     return str(content or "")
 
 
-def _latest_user(messages: list[dict[str, Any]]) -> str:
+def _latest_user_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     for msg in reversed(messages):
         if msg.get("role") == "user":
-            return _content_text(msg.get("content")).strip()
-    return ""
+            return msg
+    return None
+
+
+def _latest_user(messages: list[dict[str, Any]]) -> str:
+    msg = _latest_user_message(messages)
+    return _content_text(msg.get("content")).strip() if msg else ""
+
+
+def _has_non_text_user_content(messages: list[dict[str, Any]]) -> bool:
+    msg = _latest_user_message(messages)
+    if not msg:
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    for item in content:
+        if not isinstance(item, dict):
+            return True
+        if item.get("type") not in {"text", "input_text"}:
+            return True
+    return False
 
 
 def _is_continuation(messages: list[dict[str, Any]]) -> bool:
@@ -97,6 +156,26 @@ def _depends_on_history(text: str) -> bool:
     return any(hint in lower for hint in _CONTEXTUAL_HINTS)
 
 
+def _route_heuristic(messages: list[dict[str, Any]], user_text: str) -> tuple[str, str]:
+    """Return (DIRECT|AGENT, reason) without another model invocation."""
+    if not user_text:
+        return "AGENT", "empty-user"
+    if _has_non_text_user_content(messages):
+        return "AGENT", "non-text-input"
+    if _depends_on_history(user_text):
+        return "AGENT", "history-reference"
+    if _CURRENT_RE.search(user_text):
+        return "AGENT", "current-state"
+    if _PRIVATE_POSSESSIVE_RE.search(user_text):
+        return "AGENT", "private-state"
+    if _ACTION_RE.search(user_text) and _CAPABILITY_RE.search(user_text):
+        return "AGENT", "external-action"
+    # Explicit capability names without an action are often questions ABOUT the concept
+    # (e.g. "o que é Docker?") and can be answered directly. Default DIRECT when no
+    # evidence of fresh/private state or an action exists.
+    return "DIRECT", "knowledge"
+
+
 def _backend_json(payload: dict[str, Any], timeout: float = TIMEOUT) -> dict[str, Any]:
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -109,27 +188,6 @@ def _backend_json(payload: dict[str, Any], timeout: float = TIMEOUT) -> dict[str
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _classify(payload: dict[str, Any], user_text: str) -> str:
-    if not user_text or _depends_on_history(user_text):
-        return "AGENT"
-    route_payload = {
-        "model": payload.get("model"),
-        "messages": [
-            {"role": "system", "content": ROUTER_SYSTEM},
-            {"role": "user", "content": user_text},
-        ],
-        "stream": False,
-        "max_tokens": 4,
-        "temperature": 0,
-    }
-    result = _backend_json(route_payload, timeout=min(TIMEOUT, 120.0))
-    try:
-        text = result["choices"][0]["message"]["content"].strip().upper()
-    except Exception:
-        return "AGENT"
-    return "DIRECT" if text.startswith("DIRECT") else "AGENT"
-
-
 def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
     out = copy.deepcopy(payload)
     out["messages"] = [
@@ -139,6 +197,14 @@ def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
     out.pop("tools", None)
     out.pop("tool_choice", None)
     out.pop("parallel_tool_calls", None)
+    # Make literal short-format requests cheap and deterministic. Do not cap normal
+    # writing/explanation prompts because they may legitimately require long output.
+    if _STRICT_OUTPUT_RE.search(user_text):
+        current = out.get("max_tokens")
+        if not isinstance(current, int) or current <= 0:
+            current = 24
+        out["max_tokens"] = min(current, 24)
+        out["temperature"] = 0
     return out
 
 
@@ -150,7 +216,7 @@ def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesFastRouter/1.0"
+    server_version = "HermesFastRouter/2.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -196,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            data = json.dumps({"ok": True, "backend": BACKEND}).encode()
+            data = json.dumps({"ok": True, "backend": BACKEND, "router_version": 2}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -221,41 +287,36 @@ class Handler(BaseHTTPRequestHandler):
         tools = payload.get("tools") or []
         started = time.monotonic()
 
-        # No Hermes tool surface: this is already a compact/direct request (auxiliary tasks,
-        # smoke tests, or callers using the endpoint directly). Proxy unchanged.
+        # No Hermes tool surface: already compact/direct (auxiliary tasks, smoke tests,
+        # or callers using the endpoint directly). Proxy unchanged.
         if not tools:
             self.log_message("route=PASSTHROUGH no-tools")
             self._relay(BACKEND + self.path, raw, "application/json")
             return
 
-        # After a tool call we must preserve the agent loop. Do not classify again.
+        # After a tool call preserve the agent loop. Never re-route a continuation.
         if _is_continuation(messages):
             routed = _agent_payload(payload)
-            self.log_message("route=AGENT continuation compact-system")
+            self.log_message("route=AGENT reason=continuation compact-system")
             self._relay(BACKEND + self.path, json.dumps(routed, ensure_ascii=False).encode(), "application/json")
             return
 
         user_text = _latest_user(messages)
-        try:
-            route = _classify(payload, user_text)
-        except Exception as exc:
-            route = "AGENT"
-            self.log_message("classifier-error=%r fallback=AGENT", exc)
-
+        route, reason = _route_heuristic(messages, user_text)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         if route == "DIRECT":
             routed = _direct_payload(payload, user_text)
-            self.log_message("route=DIRECT classify_ms=%d chars=%d", elapsed_ms, len(user_text))
+            self.log_message("route=DIRECT reason=%s route_ms=%d chars=%d", reason, elapsed_ms, len(user_text))
         else:
             routed = _agent_payload(payload)
-            self.log_message("route=AGENT classify_ms=%d compact-system chars=%d", elapsed_ms, len(user_text))
+            self.log_message("route=AGENT reason=%s route_ms=%d compact-system chars=%d", reason, elapsed_ms, len(user_text))
 
         self._relay(BACKEND + self.path, json.dumps(routed, ensure_ascii=False).encode(), "application/json")
 
 
 def main() -> int:
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    print(f"[fast-router] listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
+    print(f"[fast-router] version=2 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
