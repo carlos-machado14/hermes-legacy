@@ -11,7 +11,8 @@ DIRECT vs AGENT defeats the purpose of the fast path.
 
 DIRECT: tiny system prompt + latest user message, no tools.
 AGENT: compact local-agent contract + Hermes' progressive-disclosure bridge tools.
-Tool continuations always stay on AGENT.
+Known simple capabilities may call tool_call directly, avoiding tool_search +
+tool_describe round-trips. Tool continuations stay on AGENT.
 
 /v1/route exposes the same deterministic decision without running the model. This
 lets `hermes -z` decide before constructing AIAgent and skip most CLI startup work
@@ -48,8 +49,9 @@ AGENT_SYSTEM = (
     "needs external/private/current state or an action. Deferred capability families available through "
     "tool_search include: web/current information; files; terminal/processes; code execution; memory and "
     "past sessions; skills; cron/scheduling; browser; vision/images; todo; delegation; connections; clarify. "
-    "For a deferred capability use tool_search, then tool_describe when parameters are unknown, then tool_call. "
-    "Never fabricate tool results or actions. If no tool is needed, answer directly. Keep calls and final answers concise."
+    "When an exact tool name and argument shape are given below, SKIP tool_search and tool_describe and call "
+    "tool_call directly. Otherwise use tool_search, then tool_describe only when parameters are unknown, then "
+    "tool_call. Never fabricate tool results or actions. Keep calls and final answers concise."
 )
 
 _CONTEXTUAL_HINTS = (
@@ -92,8 +94,6 @@ _PRIVATE_POSSESSIVE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Personal facts/preferences and explicit remembering must go through the agent so
-# Hermes can persist them instead of silently answering on the stateless DIRECT path.
 _MEMORY_INTENT_RE = re.compile(
     r"\b(lembre|lembra|lembrar|guarde|guardar|memorize|memorizar|anote|anotar|"
     r"meu nome (?:é|e)|me chamo|eu prefiro|minha prefer[eê]ncia|"
@@ -104,6 +104,15 @@ _MEMORY_INTENT_RE = re.compile(
 _STRICT_OUTPUT_RE = re.compile(
     r"\b(somente|apenas|s[oó]|only|just|one word|uma palavra|sem explica[cç][aã]o|"
     r"sem texto extra|no explanation|nothing else)\b",
+    re.IGNORECASE,
+)
+
+# Small-model fast recipe. The terminal tool's stable minimal schema is
+# {command:string}; supplying it here lets Qwen invoke tool_call directly instead
+# of spending two extra LLM turns discovering and describing terminal.
+_TERMINAL_FAST_RE = re.compile(
+    r"\b(hostname|terminal|shell|vps|servidor|server|docker|processo|process|"
+    r"cpu|mem[oó]ria ram|ram|disco|disk|uptime|systemctl|journalctl|porta|port)\b",
     re.IGNORECASE,
 )
 
@@ -150,6 +159,15 @@ def _has_non_text_user_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _assistant_tool_name(msg: dict[str, Any]) -> str:
+    calls = msg.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return ""
+    first = calls[0] if isinstance(calls[0], dict) else {}
+    fn = first.get("function") if isinstance(first.get("function"), dict) else {}
+    return str(fn.get("name") or "")
+
+
 def _is_continuation(messages: list[dict[str, Any]]) -> bool:
     for msg in messages:
         if msg.get("role") == "tool":
@@ -157,6 +175,13 @@ def _is_continuation(messages: list[dict[str, Any]]) -> bool:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             return True
     return False
+
+
+def _has_real_tool_call(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(msg, dict) and msg.get("role") == "assistant" and _assistant_tool_name(msg) == "tool_call"
+        for msg in messages
+    )
 
 
 def _depends_on_history(text: str) -> bool:
@@ -202,15 +227,68 @@ def _direct_payload(payload: dict[str, Any], user_text: str) -> dict[str, Any]:
     return out
 
 
-def _agent_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _agent_system_for(user_text: str) -> str:
+    system = AGENT_SYSTEM
+    if _TERMINAL_FAST_RE.search(user_text):
+        system += (
+            " FAST RECIPE FOR THIS REQUEST: terminal is known. Do NOT call tool_search or tool_describe. "
+            "Call tool_call directly with calls=[{\"name\":\"terminal\",\"arguments\":{\"command\":\"<shell command>\"}}]. "
+            "Use the smallest safe command that answers the request, then answer from its result."
+        )
+    return system
+
+
+def _compact_after_real_tool(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """After tool_call has actually executed, drop discovery chatter from the next LLM turn.
+
+    The final answer only needs the latest user request plus the actual tool_call and its
+    result. Keeping tool_search/tool_describe transcripts makes CPU prefill grow on every
+    continuation and is the main source of multi-10-second agent latency.
+    """
+    if not _has_real_tool_call(messages):
+        return messages
+
+    latest_user_idx = -1
+    real_call_idx = -1
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user":
+            latest_user_idx = idx
+        if msg.get("role") == "assistant" and _assistant_tool_name(msg) == "tool_call":
+            real_call_idx = idx
+
+    if real_call_idx < 0:
+        return messages
+
+    compact: list[dict[str, Any]] = []
+    if latest_user_idx >= 0:
+        compact.append(messages[latest_user_idx])
+    compact.extend(m for m in messages[real_call_idx:] if isinstance(m, dict) and m.get("role") != "system")
+    return compact
+
+
+def _agent_payload(payload: dict[str, Any], user_text: str | None = None) -> dict[str, Any]:
     out = copy.deepcopy(payload)
-    messages = [m for m in (out.get("messages") or []) if isinstance(m, dict) and m.get("role") != "system"]
-    out["messages"] = [{"role": "system", "content": AGENT_SYSTEM}, *messages]
+    raw_messages = [m for m in (out.get("messages") or []) if isinstance(m, dict) and m.get("role") != "system"]
+    if user_text is None:
+        user_text = _latest_user(raw_messages)
+    messages = _compact_after_real_tool(raw_messages)
+    out["messages"] = [{"role": "system", "content": _agent_system_for(user_text)}, *messages]
+
+    # Once the real tool result exists, the remaining job is normally a short final
+    # answer. Bound it aggressively when the user explicitly requested terse output.
+    if _has_real_tool_call(raw_messages) and _STRICT_OUTPUT_RE.search(user_text):
+        current = out.get("max_tokens")
+        if not isinstance(current, int) or current <= 0:
+            current = 32
+        out["max_tokens"] = min(current, 32)
+        out["temperature"] = 0
     return out
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesFastRouter/4.0"
+    server_version = "HermesFastRouter/5.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -273,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._json_response(200, {"ok": True, "backend": BACKEND, "router_version": 4})
+            self._json_response(200, {"ok": True, "backend": BACKEND, "router_version": 5})
             return
         self._relay(BACKEND + self.path)
 
@@ -286,13 +364,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": "invalid JSON"})
             return
 
-        # Deterministic, model-free route probe for the CLI pre-agent fast path.
         if self.path in {"/route", "/v1/route"}:
             text = str(payload.get("text") or payload.get("prompt") or "").strip()
             messages = [{"role": "user", "content": text}]
             route, reason = _route_heuristic(messages, text)
             self.log_message("route-probe=%s reason=%s chars=%d", route, reason, len(text))
-            self._json_response(200, {"route": route, "reason": reason, "router_version": 4})
+            self._json_response(200, {"route": route, "reason": reason, "router_version": 5})
             return
 
         if self.path != "/v1/chat/completions":
@@ -308,28 +385,33 @@ class Handler(BaseHTTPRequestHandler):
             self._relay(BACKEND + self.path, raw, "application/json")
             return
 
+        user_text = _latest_user(messages)
         if _is_continuation(messages):
-            routed = _agent_payload(payload)
-            self.log_message("route=AGENT reason=continuation compact-system")
+            routed = _agent_payload(payload, user_text)
+            mode = "post-tool-compact" if _has_real_tool_call(messages) else "bridge-continuation"
+            self.log_message("route=AGENT reason=continuation mode=%s chars=%d", mode, len(user_text))
             self._relay(BACKEND + self.path, json.dumps(routed, ensure_ascii=False).encode(), "application/json")
             return
 
-        user_text = _latest_user(messages)
         route, reason = _route_heuristic(messages, user_text)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         if route == "DIRECT":
             routed = _direct_payload(payload, user_text)
             self.log_message("route=DIRECT reason=%s route_ms=%d chars=%d", reason, elapsed_ms, len(user_text))
         else:
-            routed = _agent_payload(payload)
-            self.log_message("route=AGENT reason=%s route_ms=%d compact-system chars=%d", reason, elapsed_ms, len(user_text))
+            routed = _agent_payload(payload, user_text)
+            fast_recipe = "terminal" if _TERMINAL_FAST_RE.search(user_text) else "none"
+            self.log_message(
+                "route=AGENT reason=%s route_ms=%d fast_recipe=%s chars=%d",
+                reason, elapsed_ms, fast_recipe, len(user_text),
+            )
 
         self._relay(BACKEND + self.path, json.dumps(routed, ensure_ascii=False).encode(), "application/json")
 
 
 def main() -> int:
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    print(f"[fast-router] version=4 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
+    print(f"[fast-router] version=5 listening=http://{LISTEN_HOST}:{LISTEN_PORT} backend={BACKEND}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
