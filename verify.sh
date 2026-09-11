@@ -66,7 +66,6 @@ walk(x)
 for v in jobs:
     p=v.get('model_provider')
     m=v.get('model')
-    # An unpinned job is valid because cron.model_provider/model are local-only fleet defaults.
     if p and p != 'custom':
         bad.append((v.get('id') or v.get('job_id'),p,m))
     if m and m != os.environ['EXPECTED_MODEL']:
@@ -81,6 +80,15 @@ fi
 
 systemctl --user is-active --quiet hermes-gateway.service && echo 'gateway service : OK' || echo 'gateway service : WARNING/not active'
 
-echo 'Executando resposta real pelo Hermes (pode ser lenta na CPU)...'
-timeout 900 "$HERMES_BIN" -z 'Responda somente: OK'
-echo 'VERIFY OK'
+echo 'Executando resposta real pelo Hermes (limite: 180s; Ctrl+C funciona)...'
+if timeout --foreground --signal=INT --kill-after=10s 180 "$HERMES_BIN" -z 'Responda somente: OK'; then
+  echo 'VERIFY OK'
+else
+  rc=$?
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    echo 'VERIFY WARNING: teste real excedeu 180s; serviços básicos continuam validados.' >&2
+  else
+    echo "VERIFY WARNING: teste real terminou com código $rc." >&2
+  fi
+  exit "$rc"
+fi
