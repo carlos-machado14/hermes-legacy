@@ -1,0 +1,9 @@
+*.log
+*.bak
+.env
+config.yaml
+auth.json
+jobs.json
+backups/
+__pycache__/
+.DS_Store
