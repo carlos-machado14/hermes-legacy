@@ -6,8 +6,9 @@ TARGET="$HOME/.hermes/core-v2"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 SCRIPTS="$HOME/.hermes/scripts"
+MEMORY_VAULT="$HOME/.hermes/memory"
 
-log() { printf '[core-v3.5] %s\n' "$*"; }
+log() { printf '[core-v3.6] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -22,7 +23,8 @@ ensure_venv_support() {
 }
 
 mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER" "$SCRIPTS"
-chmod 700 "$TARGET/state" "$TARGET/logs" 2>/dev/null || true
+mkdir -p "$MEMORY_VAULT"/{profile,goals,projects,business,conversations,decisions,daily}
+chmod 700 "$TARGET/state" "$TARGET/logs" "$MEMORY_VAULT" 2>/dev/null || true
 
 for file in \
   hermes_core.py tools.py planner.py health_monitor.py local_briefs.py \
@@ -32,7 +34,8 @@ for file in \
   skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py \
   onboarding_parser.py context_builder.py decision_log.py proactive_engine.py \
   proactive_settings.py autonomous_service.py action_queue.py autonomy_settings.py goal_execution_engine.py \
-  lead_manager.py crm_engine.py deep_research.py opportunity_hunter.py learning_engine.py business_router.py; do
+  lead_manager.py crm_engine.py deep_research.py opportunity_hunter.py learning_engine.py business_router.py \
+  conversation_memory.py contextual_router.py core_entry.py memory_vault.py memory_router.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -42,7 +45,6 @@ if [ ! -f "$TARGET/config.yaml" ]; then
   cp "$TARGET/config.example.yaml" "$TARGET/config.yaml"
   chmod 600 "$TARGET/config.yaml" 2>/dev/null || true
 else
-  # Migrate only the historical default. Any custom value chosen by the user is preserved.
   if grep -Eq '^[[:space:]]*max_tokens:[[:space:]]*320[[:space:]]*$' "$TARGET/config.yaml"; then
     sed -i -E 's/^([[:space:]]*max_tokens:[[:space:]]*)320[[:space:]]*$/\1900/' "$TARGET/config.yaml"
     log "Limite legado de resposta atualizado: 320 -> 900 tokens"
@@ -59,7 +61,13 @@ if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then log "pip a
 log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
-chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
+
+log "Inicializando Memory Vault leve..."
+(
+  cd "$TARGET"
+  "$TARGET/venv/bin/python" -c 'from memory_vault import sync_state_snapshots, refresh_index, summary; sync_state_snapshots(); refresh_index(); print(summary())'
+)
 
 log "Instalando wrappers genericos opcionais (nenhuma cron sera criada)..."
 make_wrapper() {
@@ -110,7 +118,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-api.service" <<EOF
 [Unit]
-Description=Hermes Core v3.5 Local API
+Description=Hermes Core v3.6 Local API
 After=network-online.target hermes-core-health.service
 [Service]
 Type=simple
@@ -128,7 +136,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-autonomous.service" <<EOF
 [Unit]
-Description=Hermes Core v3.5 Autonomous Personal + Business Agent
+Description=Hermes Core v3.6 Autonomous Personal + Business Agent
 After=network-online.target hermes-gateway.service hermes-core-api.service
 [Service]
 Type=simple
@@ -148,14 +156,14 @@ systemctl --user restart hermes-core-health.service hermes-core-watchers.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, agent_router; print("dependencias Core v3.5 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, core_entry, agent_router; print("dependencias Core v3.6 OK")'
 )
 
 log "Validando API..."; sleep 1; curl -fsS http://127.0.0.1:8090/health >/dev/null
-log "Hermes Core v3.5 instalado/atualizado em $TARGET"
+log "Hermes Core v3.6 instalado/atualizado em $TARGET"
+echo "Memory Vault: $MEMORY_VAULT"
+echo "Indice leve SQLite: $TARGET/state/memory_index.sqlite3"
 echo "Estado pessoal e de negocios preservado em: $TARGET/state"
-echo "CRM + Leads + Opportunity Hunter + Deep Research + Learning Loop: instalados"
-echo "Execucao autonoma segura continua ativa conforme configuracao pessoal preservada"
-echo "Acoes externas/medio-alto risco continuam exigindo aprovacao explicita"
+echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
 echo "API local: http://127.0.0.1:8090"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
