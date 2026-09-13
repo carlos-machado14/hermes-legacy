@@ -28,6 +28,20 @@ def _after(text: str, markers: tuple[str, ...]) -> str:
     return ''
 
 
+def _active_goal(category: str | None = None):
+    rows = list_goals(include_done=False)
+    if category:
+        rows = [g for g in rows if g.get('category') == category]
+    return rows[-1] if rows else None
+
+
+def _plan_active_goal(*, money: bool = False) -> str:
+    goal = _active_goal('money' if money else None)
+    if not goal:
+        return 'Nenhum objetivo financeiro ativo.' if money else 'Nenhum objetivo ativo.'
+    return plan_summary(str(goal.get('id') or ''))
+
+
 def _money_advice() -> str:
     p = profile(); skills = p.get('skills') or []
     goals = [g for g in list_goals(include_done=False) if g.get('category') == 'money']
@@ -123,12 +137,22 @@ def handle(text: str) -> str | None:
     if any(k in low for k in ('quero ganhar ', 'meta de renda', 'meta de receita', 'quero faturar ')):
         inferred = infer_money_goal(t)
         if inferred:
-            g = create_goal(**inferred); record('goal_created', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo financeiro criado: [{g['id']}] {g['title']}\nUse: plano do objetivo {g['id']}"
+            g = create_goal(**inferred); record('goal_created', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo financeiro criado: [{g['id']}] {g['title']}\nUse: plano do meu objetivo financeiro"
     if low.startswith('concluir objetivo ') or low.startswith('finalizar objetivo '):
         ref = _after(t, ('concluir objetivo', 'finalizar objetivo'))
         try: g = complete_goal(ref); record('goal_completed', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo concluído: {g['title']}"
         except KeyError: return 'Objetivo não encontrado.'
-    if low.startswith('plano do objetivo ') or low.startswith('planeje objetivo '): return plan_summary(_after(t, ('plano do objetivo', 'planeje objetivo')))
+
+    # Natural-language goal planning must stay deterministic. Previously phrases such
+    # as "plano do meu objetivo financeiro" fell through to the local LLM and could
+    # hit the fastpath timeout even though the goal already existed.
+    if any(k in low for k in ('plano do meu objetivo financeiro', 'plano do objetivo financeiro', 'planeje meu objetivo financeiro', 'planejar meu objetivo financeiro')):
+        return _plan_active_goal(money=True)
+    if low in {'plano do meu objetivo', 'planeje meu objetivo', 'planejar meu objetivo'}:
+        return _plan_active_goal()
+    if low.startswith('plano do objetivo ') or low.startswith('planeje objetivo '):
+        return plan_summary(_after(t, ('plano do objetivo', 'planeje objetivo')))
+
     if any(k in low for k in ('minhas tarefas', 'listar tarefas', 'tarefas pendentes')): return tasks_summary()
     if any(low.startswith(k) for k in ('crie tarefa ', 'criar tarefa ', 'nova tarefa ')):
         task = create_task(_after(t, ('crie tarefa', 'criar tarefa', 'nova tarefa'))); record('task_created', task['title'], metadata={'task_id': task['id']}); return f"Tarefa criada: [{task['id']}] {task['title']}"
