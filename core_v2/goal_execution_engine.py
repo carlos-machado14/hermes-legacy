@@ -27,8 +27,6 @@ def classify_task(task: dict[str, Any]) -> dict[str, Any]:
     low = title.casefold()
     metadata = task.get('metadata') or {}
 
-    # O workflow diario de sites possui varias etapas internas seguras. Elas nao
-    # devem pedir aprovacao uma a uma; somente contato/publicacao externa exige.
     if metadata.get('workflow') == 'daily_site_sales':
         step = int(metadata.get('step') or 0)
         if step == 9 or any(w in low for w in ('fazer contato', 'enviar ao cliente', 'publicar em produção', 'publicar em producao')):
@@ -73,11 +71,6 @@ def propose_from_context(limit: int = 5) -> list[dict[str, Any]]:
 
 
 def release_safe_pending() -> dict[str, Any]:
-    """Reclassifica acoes antigas que foram enfileiradas antes das regras atuais.
-
-    Apenas acoes que hoje sao classificadas como low-risk internas sao liberadas.
-    Acoes externas continuam pendentes de aprovacao explicita.
-    """
     tasks = {str(t.get('id')): t for t in list_tasks()}
     released: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
@@ -89,11 +82,8 @@ def release_safe_pending() -> dict[str, Any]:
         current = classify_task(task)
         if current.get('risk') == 'low' and not current.get('requires_approval'):
             action = update_action(
-                action['id'],
-                kind=current['kind'],
-                risk='low',
-                requires_approval=False,
-                status='queued',
+                action['id'], kind=current['kind'], risk='low',
+                requires_approval=False, status='queued',
                 reclassified_at=int(time.time()),
             )
             released.append(action)
@@ -138,17 +128,25 @@ def execute_action(ref: str, *, force_approved: bool = False) -> dict[str, Any]:
     if action.get('requires_approval') and action.get('status') != 'approved' and not force_approved:
         return action
     if action.get('status') in {'done','rejected'}: return action
+
+    kind=action.get('kind')
+    if kind in {'external_action','user_action'}:
+        # Aprovação e execução são estados diferentes. Depois que o usuário aprova,
+        # não marcamos a ação como bloqueada. Ela fica pronta para o executor remoto
+        # (Freud/connectors) ou para uma implementação específica posterior.
+        if action.get('status') == 'approved' or force_approved:
+            result = 'Aprovação registrada. A ação está pronta para execução pelo conector responsável; nenhuma ação externa foi simulada localmente.'
+            return update_action(action['id'], status='approved', result=result, approved_ready_at=int(time.time()))
+        result = 'Ação externa aguardando aprovação explícita.'
+        return update_action(action['id'], status='pending_approval', result=result, requires_approval=True)
+
     update_action(action['id'], status='running', started_at=int(time.time()))
     try:
-        kind=action.get('kind')
         if kind == 'research':
             query = re.sub(r'^(pesquisar|pesquise|buscar|encontrar|mapear|levantar|procurar)\s+', '', action.get('title',''), flags=re.I).strip() or action.get('title','')
             result = format_results(query, limit=5)
         elif kind == 'draft': result = _draft(action)
         elif kind == 'analysis': result = _analysis(action)
-        elif kind in {'external_action','user_action'}:
-            result = 'Ação depende de você ou de autorização explícita. Nenhuma ação externa foi executada automaticamente.'
-            return update_action(action['id'], status='blocked', result=result)
         else: result = _analysis(action)
         path=_save_result(action, result)
         done=update_action(action['id'], status='done', result=result, result_path=path, completed_at=int(time.time()))
