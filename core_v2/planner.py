@@ -8,14 +8,14 @@ READ_ONLY_PLANS: dict[str, list[dict[str, Any]]] = {
     'diagnose_crons': [
         {'tool': 'cron_status'},
         {'tool': 'cron_list'},
-        {'tool': 'gateway_logs', 'arguments': {'lines': 80}},
-        {'tool': 'llm_logs', 'arguments': {'lines': 60}},
+        {'tool': 'gateway_logs', 'arguments': {'lines': 35}},
+        {'tool': 'llm_logs', 'arguments': {'lines': 25}},
     ],
     'diagnose_services': [
         {'tool': 'services'},
-        {'tool': 'gateway_logs', 'arguments': {'lines': 40}},
-        {'tool': 'llm_logs', 'arguments': {'lines': 40}},
-        {'tool': 'router_logs', 'arguments': {'lines': 40}},
+        {'tool': 'gateway_logs', 'arguments': {'lines': 25}},
+        {'tool': 'llm_logs', 'arguments': {'lines': 25}},
+        {'tool': 'router_logs', 'arguments': {'lines': 25}},
     ],
 }
 
@@ -40,8 +40,11 @@ def execute(plan_name: str) -> dict[str, Any]:
     return {'ok': True, 'plan': plan_name, 'results': results}
 
 
-def compact_for_llm(report: dict[str, Any], max_chars: int = 12000) -> str:
-    text = json.dumps(report, ensure_ascii=False)
+def compact_for_llm(report: dict[str, Any], max_chars: int = 4500) -> str:
+    """Keep local-LLM diagnostic prompts small on CPU-only VPSes."""
+    text = json.dumps(report, ensure_ascii=False, separators=(',', ':'))
     if len(text) <= max_chars:
         return text
-    return text[:max_chars] + '\n...[truncated]'
+    head = text[: max_chars // 2]
+    tail = text[-(max_chars // 2):]
+    return head + '\n...[middle truncated]...\n' + tail
