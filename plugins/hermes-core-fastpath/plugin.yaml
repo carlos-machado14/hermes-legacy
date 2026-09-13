@@ -1,0 +1,5 @@
+name: hermes-core-fastpath
+version: 1.0.0
+description: Intercepta comandos operacionais e de cron no gateway antes da compressao de contexto.
+provides_hooks:
+  - pre_gateway_dispatch
