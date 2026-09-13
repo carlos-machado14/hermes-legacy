@@ -98,7 +98,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now hermes-core-health.service
 
 log "Validando imports..."
-"$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools, planner; print("dependencias OK")'
+(
+  cd "$TARGET"
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools, planner; print("dependencias OK")'
+)
 
 log "Hermes Core v2 instalado em $TARGET"
 echo "Testes:"
