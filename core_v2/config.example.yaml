@@ -1,0 +1,14 @@
+llm:
+  base_url: http://127.0.0.1:8088/v1
+  model: Qwen3-1.7B-Q4_K_M.gguf
+  timeout_seconds: 120
+  max_tokens: 320
+agent:
+  max_steps: 6
+  local_first: true
+  language: pt-BR
+health:
+  interval_seconds: 60
+paths:
+  state_dir: state
+  log_dir: logs
