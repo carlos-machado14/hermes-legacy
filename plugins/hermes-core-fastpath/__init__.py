@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +56,7 @@ def _authorized(gateway: Any, source: Any) -> bool:
 
     pre_gateway_dispatch runs before the gateway's normal auth gate, so this helper
     must fail closed. Newer Hermes exposes _is_user_authorized_for_source; older
-    installs do not, so we fall back to the already-approved pairing store and
-    explicit allowlists only. We never default to allow-all.
+    installs do not, so we fall back to approved pairing and explicit allowlists.
     """
     platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
     user_id = getattr(source, 'user_id', None)
@@ -70,7 +71,6 @@ def _authorized(gateway: Any, source: Any) -> bool:
         except Exception as exc:
             logger.warning("fastpath native auth failed, trying compatibility path: %s", exc)
 
-    # Legacy Hermes: approved DM pairing is a first-class authorization grant.
     stores = []
     store_for = getattr(gateway, '_pairing_store_for', None)
     if callable(store_for):
@@ -91,8 +91,6 @@ def _authorized(gateway: Any, source: Any) -> bool:
             except Exception as exc:
                 logger.debug("fastpath pairing auth check failed: %s", exc)
 
-    # Explicit per-platform and global allowlists. This mirrors the common Hermes
-    # configuration without weakening the gateway: missing lists remain DENY.
     env_name = {
         'telegram': 'TELEGRAM_ALLOWED_USERS',
         'discord': 'DISCORD_ALLOWED_USERS',
@@ -108,7 +106,6 @@ def _authorized(gateway: Any, source: Any) -> bool:
         logger.info("fastpath auth=global_allowlist result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
         return True
 
-    # Honor allow-all only when the operator explicitly enabled it.
     allow_all_name = f"{platform.upper()}_ALLOW_ALL_USERS" if platform else ''
     if allow_all_name and _env_value(allow_all_name).lower() in {'1', 'true', 'yes'}:
         logger.warning("fastpath auth=explicit_allow_all result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
@@ -119,6 +116,28 @@ def _authorized(gateway: Any, source: Any) -> bool:
 
     logger.warning("fastpath auth=compat result=False platform=%s chat=%s user=%s", platform, chat_id, user_id)
     return False
+
+
+def _remember_channel(source: Any) -> None:
+    """Persist only the last authorized delivery channel, never credentials."""
+    platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
+    chat_id = str(getattr(source, 'chat_id', '') or '').strip()
+    user_id = str(getattr(source, 'user_id', '') or '').strip()
+    if platform != 'telegram' or not chat_id:
+        return
+    try:
+        path = Path.home() / '.hermes' / 'core-v2' / 'state' / 'channel_state.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            'platform': platform,
+            'chat_id': chat_id,
+            'user_id': user_id,
+            'updated_at': int(time.time()),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        logger.info("fastpath remembered proactive channel platform=%s chat=%s", platform, chat_id)
+    except Exception as exc:
+        logger.warning("fastpath could not remember proactive channel: %s", exc)
 
 
 def _run_core(text: str) -> str:
@@ -189,6 +208,9 @@ def pre_gateway_dispatch(**kwargs):
     if not _authorized(gateway, source):
         logger.info("fastpath allow legacy path: sender not authorized by compatibility gate")
         return None
+
+    _remember_channel(source)
+
     if text.startswith('/'):
         logger.info("fastpath allow slash command=%r", text[:80])
         return None
@@ -208,5 +230,5 @@ def pre_gateway_dispatch(**kwargs):
 
 
 def register(ctx):
-    logger.warning("HERMES CORE FASTPATH v1.1.1 REGISTERED")
+    logger.warning("HERMES CORE FASTPATH v1.2.0 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
