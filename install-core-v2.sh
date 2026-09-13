@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$HOME/.hermes/core-v2"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+SYSTEMD_USER="$HOME/.config/systemd/user"
 
 log() { printf '[core-v2] %s\n' "$*"; }
 
@@ -38,9 +39,11 @@ ensure_venv_support() {
   fi
 }
 
-mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs"
+mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER"
 cp "$ROOT/core_v2/hermes_core.py" "$TARGET/hermes_core.py"
 cp "$ROOT/core_v2/tools.py" "$TARGET/tools.py"
+cp "$ROOT/core_v2/planner.py" "$TARGET/planner.py"
+cp "$ROOT/core_v2/health_monitor.py" "$TARGET/health_monitor.py"
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
@@ -72,13 +75,33 @@ log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
 
-chmod +x "$TARGET/hermes_core.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py"
+
+log "Instalando health monitor..."
+cat > "$SYSTEMD_USER/hermes-core-health.service" <<EOF
+[Unit]
+Description=Hermes Core v2 Self-Healing Health Monitor
+After=network-online.target hermes-local-llm.service hermes-gateway.service
+
+[Service]
+Type=simple
+ExecStart=$TARGET/venv/bin/python $TARGET/health_monitor.py
+Restart=always
+RestartSec=5
+WorkingDirectory=$TARGET
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-core-health.service
 
 log "Validando imports..."
-"$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools; print("dependencias OK")'
+"$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools, planner; print("dependencias OK")'
 
 log "Hermes Core v2 instalado em $TARGET"
 echo "Testes:"
 echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'status da vps'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'listar crons'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'containers'"
+echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'verifique por que minhas crons estao falhando'"
+echo "  systemctl --user status hermes-core-health.service --no-pager"
