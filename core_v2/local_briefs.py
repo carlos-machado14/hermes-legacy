@@ -5,7 +5,7 @@ import html
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -18,22 +18,38 @@ MAX_ITEMS = 6
 ROOT = Path.home() / ".hermes" / "core-v2"
 STATE = ROOT / "state"
 
+# Todas as fontes de notícias são consultadas com localização pt-BR para que
+# as crons entreguem conteúdo em português sem depender do LLM para tradução.
 FEEDS = {
     "ai": [
-        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
-        ("Google AI", "https://blog.google/technology/ai/rss/"),
-        ("Hugging Face", "https://huggingface.co/blog/feed.xml"),
-        ("The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
+        (
+            "Notícias de IA",
+            "https://news.google.com/rss/search?q=intelig%C3%AAncia+artificial+IA+tecnologia&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
+        (
+            "IA e modelos",
+            "https://news.google.com/rss/search?q=OpenAI+Google+Gemini+Claude+modelos+IA&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
     ],
     "marketing": [
-        ("Search Engine Journal", "https://www.searchenginejournal.com/feed/"),
-        ("HubSpot Marketing", "https://blog.hubspot.com/marketing/rss.xml"),
-        ("Moz", "https://moz.com/blog/feed"),
+        (
+            "Marketing Digital",
+            "https://news.google.com/rss/search?q=marketing+digital+vendas+leads+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
+        (
+            "Negócios e aquisição",
+            "https://news.google.com/rss/search?q=neg%C3%B3cios+aquisi%C3%A7%C3%A3o+clientes+SEO+redes+sociais&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
     ],
     "product": [
-        ("Product Hunt", "https://www.producthunt.com/feed"),
-        ("Hacker News", "https://hnrss.org/frontpage"),
-        ("TechCrunch Startups", "https://techcrunch.com/category/startups/feed/"),
+        (
+            "Startups e Produtos",
+            "https://news.google.com/rss/search?q=startups+novos+produtos+tecnologia+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
+        (
+            "SaaS e oportunidades",
+            "https://news.google.com/rss/search?q=SaaS+aplicativos+inova%C3%A7%C3%A3o+oportunidades+neg%C3%B3cios&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ),
     ],
 }
 
@@ -56,12 +72,11 @@ def fetch_feed(source: str, url: str) -> list[dict]:
         return [{"source": source, "error": str(exc)}]
 
     items = []
-    for e in parsed.entries[:5]:
-        title = clean(getattr(e, "title", ""), 140)
+    for e in parsed.entries[:8]:
+        title = clean(getattr(e, "title", ""), 170)
         link = getattr(e, "link", "") or ""
-        summary = clean(getattr(e, "summary", "") or getattr(e, "description", ""), 180)
         if title:
-            items.append({"source": source, "title": title, "link": link, "summary": summary})
+            items.append({"source": source, "title": title, "link": link})
     return items
 
 
@@ -71,7 +86,7 @@ def dedupe(items: Iterable[dict]) -> list[dict]:
     for item in items:
         if item.get("error"):
             continue
-        key = re.sub(r"\W+", "", item.get("title", "").lower())[:80]
+        key = re.sub(r"\W+", "", item.get("title", "").lower())[:100]
         if not key or key in seen:
             continue
         seen.add(key)
@@ -79,7 +94,7 @@ def dedupe(items: Iterable[dict]) -> list[dict]:
     return out
 
 
-def render_news(kind: str, title: str) -> str:
+def render_news(kind: str, title: str, intro: str) -> str:
     collected: list[dict] = []
     errors: list[str] = []
     for source, url in FEEDS[kind]:
@@ -92,34 +107,34 @@ def render_news(kind: str, title: str) -> str:
 
     items = dedupe(collected)[:MAX_ITEMS]
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
-    lines = [f"{title}", f"Atualizado: {now}", ""]
+    lines = [f"🇧🇷 {title}", f"Atualizado em: {now}", "", intro, ""]
     if not items:
-        lines.append("Nenhuma notícia foi coletada agora.")
+        lines.append("Nenhuma notícia relevante foi encontrada neste momento.")
     else:
         for i, item in enumerate(items, 1):
-            lines.append(f"{i}. {item['title']} — {item['source']}")
-            if item.get("summary"):
-                lines.append(f"   {item['summary']}")
+            lines.append(f"{i}. {item['title']}")
             if item.get("link"):
-                lines.append(f"   {item['link']}")
+                lines.append(f"   🔗 {item['link']}")
+            lines.append("")
     if errors:
-        lines.extend(["", f"Fontes indisponíveis: {len(errors)}"])
-    return "\n".join(lines)
+        lines.append(f"⚠️ Fontes temporariamente indisponíveis: {len(errors)}")
+    lines.append("Conteúdo coletado automaticamente pelo Hermes na VPS.")
+    return "\n".join(lines).strip()
 
 
 def render_finance() -> str:
     path = STATE / "subscriptions.json"
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
-    lines = ["Financial Brief - Assinaturas", f"Atualizado: {now}", ""]
+    lines = ["🇧🇷 Resumo Financeiro — Assinaturas", f"Atualizado em: {now}", ""]
     if not path.exists():
-        lines.append("Nenhuma assinatura local configurada ainda.")
-        lines.append(f"Configure em: {path}")
+        lines.append("Nenhuma assinatura local foi configurada ainda.")
+        lines.append(f"Arquivo de configuração: {path}")
         return "\n".join(lines)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return "\n".join(lines + [f"Erro lendo subscriptions.json: {exc}"])
+        return "\n".join(lines + [f"Erro ao ler o arquivo de assinaturas: {exc}"])
 
     rows = data if isinstance(data, list) else data.get("subscriptions", [])
     if not rows:
@@ -137,7 +152,7 @@ def render_finance() -> str:
         if active:
             total += value
         status = "ativa" if active else "pausada"
-        lines.append(f"{i}. {name}: {currency} {value:.2f} | {billing} | próxima: {next_date} | {status}")
+        lines.append(f"{i}. {name}: {currency} {value:.2f} | {billing} | próxima cobrança: {next_date} | {status}")
     lines.extend(["", f"Total ativo informado: {total:.2f} (sem conversão cambial)"])
     return "\n".join(lines)
 
@@ -145,11 +160,23 @@ def render_finance() -> str:
 def main() -> int:
     kind = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
     if kind == "ai":
-        print(render_news("ai", "AI Daily Brief"))
+        print(render_news(
+            "ai",
+            "Resumo Diário de Inteligência Artificial",
+            "Principais notícias e movimentos de IA selecionados para você:",
+        ))
     elif kind == "marketing":
-        print(render_news("marketing", "Marketing & Leads Brief"))
+        print(render_news(
+            "marketing",
+            "Resumo de Marketing e Leads",
+            "Destaques sobre aquisição de clientes, marketing e vendas:",
+        ))
     elif kind == "product":
-        print(render_news("product", "Daily Product Opportunity Brief"))
+        print(render_news(
+            "product",
+            "Oportunidades de Produto e Negócios",
+            "Sinais de mercado, startups, produtos e oportunidades relevantes:",
+        ))
     elif kind == "finance":
         print(render_finance())
     else:
