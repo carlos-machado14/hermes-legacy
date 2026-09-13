@@ -40,6 +40,7 @@ ensure_venv_support() {
 
 mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs"
 cp "$ROOT/core_v2/hermes_core.py" "$TARGET/hermes_core.py"
+cp "$ROOT/core_v2/tools.py" "$TARGET/tools.py"
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
@@ -49,7 +50,6 @@ fi
 
 ensure_venv_support
 
-# Recreate any environment that is missing either Python or pip.
 if [ -d "$TARGET/venv" ]; then
   if [ ! -x "$TARGET/venv/bin/python" ] \
     || ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then
@@ -63,7 +63,6 @@ if [ ! -x "$TARGET/venv/bin/python" ]; then
   "$PYTHON_BIN" -m venv "$TARGET/venv"
 fi
 
-# Last-resort bootstrap for unusual Debian/Ubuntu images.
 if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then
   log "pip ainda ausente no venv; tentando ensurepip..."
   "$TARGET/venv/bin/python" -m ensurepip --upgrade
@@ -76,7 +75,10 @@ log "Instalando dependencias..."
 chmod +x "$TARGET/hermes_core.py"
 
 log "Validando imports..."
-"$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; print("dependencias OK")'
+"$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools; print("dependencias OK")'
 
 log "Hermes Core v2 instalado em $TARGET"
-echo "Teste: $TARGET/venv/bin/python $TARGET/hermes_core.py 'status da vps'"
+echo "Testes:"
+echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'status da vps'"
+echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'listar crons'"
+echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'containers'"
