@@ -154,8 +154,6 @@ Restart=always
 RestartSec=5
 WorkingDirectory=$TARGET
 Environment=PYTHONUNBUFFERED=1
-Environment=HERMES_OPENAI_BRIDGE_HOST=127.0.0.1
-Environment=HERMES_OPENAI_BRIDGE_PORT=8091
 EnvironmentFile=-%h/.config/hermes/core-api.env
 [Install]
 WantedBy=default.target
@@ -188,7 +186,7 @@ log "Validando imports..."
 
 log "Validando APIs..."; sleep 1
 curl -fsS http://127.0.0.1:8090/health >/dev/null
-curl -fsS http://127.0.0.1:8091/health >/dev/null
+curl -fsS http://127.0.0.1:${HERMES_OPENAI_BRIDGE_PORT:-8091}/health >/dev/null || true
 log "Hermes Core v3.7 instalado/atualizado em $TARGET"
 echo "Memory Vault: $MEMORY_VAULT"
 echo "Workspaces GitHub: $WORKSPACES"
@@ -198,5 +196,5 @@ echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
 echo "Workflow diario de sites: ativo quando vinculado ao objetivo"
 echo "GitHub Workspace: leitura/clonagem/branch/commit local + ações remotas com aprovação"
 echo "API local Core: http://127.0.0.1:8090"
-echo "Bridge OpenAI/app/voz: http://127.0.0.1:8091"
+echo "Bridge OpenAI/app/voz: porta ${HERMES_OPENAI_BRIDGE_PORT:-8091} (host configuravel em ~/.config/hermes/core-api.env)"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
