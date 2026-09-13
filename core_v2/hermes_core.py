@@ -25,7 +25,7 @@ with CFG.open() as f:
 BASE_URL = config['llm']['base_url'].rstrip('/')
 MODEL = config['llm']['model']
 TIMEOUT = config['llm'].get('timeout_seconds', 120)
-MAX_TOKENS = config['llm'].get('max_tokens', 320)
+MAX_TOKENS = config['llm'].get('max_tokens', 900)
 
 SERVICE_ALIASES = {
     'gateway': 'hermes-gateway.service', 'router': 'hermes-fast-router.service',
@@ -42,12 +42,45 @@ def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -
                         'Ajude o usuario a atingir objetivos, executar tarefas e gerar receita. '
                         'Nao invente resultados de ferramentas e nao alegue ter executado acoes externas sem evidencia. '
                         'Acoes externas relevantes devem respeitar o fluxo de aprovacao.')
-    payload = {'model': MODEL, 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}],
-               'temperature': 0.2, 'max_tokens': max_tokens or MAX_TOKENS}
+    segment_tokens = max_tokens or MAX_TOKENS
+    messages = [
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': prompt},
+    ]
     timeout = httpx.Timeout(connect=5.0, read=float(TIMEOUT), write=10.0, pool=5.0)
+    parts: list[str] = []
+
+    # llama.cpp/OpenAI retorna finish_reason=length quando a resposta bate o
+    # limite de tokens. Antes ignorávamos isso e o Telegram recebia uma frase
+    # cortada no meio. Agora continuamos automaticamente até concluir.
     with httpx.Client(timeout=timeout) as client:
-        r = client.post(f'{BASE_URL}/chat/completions', json=payload); r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
+        for _ in range(3):
+            payload = {
+                'model': MODEL,
+                'messages': messages,
+                'temperature': 0.2,
+                'max_tokens': segment_tokens,
+            }
+            r = client.post(f'{BASE_URL}/chat/completions', json=payload)
+            r.raise_for_status()
+            data = r.json()
+            choice = (data.get('choices') or [{}])[0]
+            piece = str((choice.get('message') or {}).get('content') or '').strip()
+            if piece:
+                parts.append(piece)
+            finish_reason = str(choice.get('finish_reason') or '').lower()
+            if finish_reason not in {'length', 'max_tokens'} or not piece:
+                break
+            messages.append({'role': 'assistant', 'content': piece})
+            messages.append({
+                'role': 'user',
+                'content': (
+                    'Continue exatamente de onde parou, sem repetir o texto anterior. '
+                    'Conclua a resposta de forma natural e não termine no meio de uma frase.'
+                ),
+            })
+
+    return '\n'.join(part for part in parts if part).strip()
 
 
 def system_health() -> dict:
