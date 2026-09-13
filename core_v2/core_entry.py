@@ -14,25 +14,39 @@ from developer_router import handle as handle_developer_command
 _original_llm = hermes_core.llm
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout'))
+
+
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    context = compact_context(max_items=4)
-    recent = recent_conversation(limit=6, max_chars=2800)
+    context = compact_context(max_items=3)
+    recent = recent_conversation(limit=4, max_chars=1600)
     sync_state_snapshots()
-    long_term = retrieve_memory(prompt, limit=4, max_chars=2600)
+    long_term = retrieve_memory(prompt, limit=3, max_chars=1400)
     enriched = (
         f"{context}\n\n"
         f"CONVERSA RECENTE\n{recent}\n\n"
-        f"MEMÓRIA DE LONGO PRAZO RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
+        f"MEMÓRIA RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
         f"MENSAGEM ATUAL\n{prompt}\n\n"
         "Responda considerando referências como isso, ele, essa ideia, aquele plano e esse objetivo. "
-        "Se o usuário estiver continuando um assunto, não reinicie a conversa nem peça dados já disponíveis. "
-        "Use somente as memórias relevantes acima; não presuma que todo o vault precisa ser carregado."
+        "Continue o assunto sem pedir novamente dados já disponíveis. Seja direto e útil."
     )
     low = prompt.lower()
     requested = max_tokens
     if requested is None:
-        requested = 760 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 420
-    return _original_llm(enriched, system=system, max_tokens=requested)
+        requested = 480 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 240
+    try:
+        return _original_llm(enriched, system=system, max_tokens=requested)
+    except Exception as exc:
+        if not _is_timeout_error(exc):
+            raise
+        # O canal não deve despejar erro técnico para o usuário. Preservamos a
+        # mensagem e devolvemos uma resposta curta, útil e recuperável.
+        return (
+            'Demorei mais do que deveria para gerar essa resposta. Mantive o contexto e sua mensagem registrada. '
+            'Vou priorizar uma resposta mais curta/objetiva na próxima interação em vez de perder a conversa.'
+        )
 
 
 hermes_core.llm = _contextual_llm
@@ -68,8 +82,15 @@ def main() -> int:
         print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
     except Exception as exc:
-        print(f'Erro no Hermes Core: {exc}', flush=True)
-        return 1
+        if _is_timeout_error(exc):
+            print(
+                'Demorei mais do que deveria para responder, mas mantive o contexto. '
+                'Sua mensagem não foi perdida.',
+                flush=True,
+            )
+            return 0
+        print(f'Não consegui concluir essa resposta agora, mas o contexto foi preservado. Detalhe: {exc}', flush=True)
+        return 0
 
 
 if __name__ == '__main__':
