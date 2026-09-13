@@ -20,6 +20,9 @@ from context_builder import snapshot as context_snapshot
 from decision_log import recent as recent_decisions
 from proactive_engine import daily_brief, weekly_review
 from proactive_settings import load as proactive_settings, enable as enable_proactive, disable as disable_proactive
+from autonomy_settings import load as autonomy_settings, enable as enable_autonomy, disable as disable_autonomy
+from action_queue import list_actions, approve as approve_action, reject as reject_action
+from goal_execution_engine import run_cycle, approve_and_execute, capability_summary
 
 ROOT = Path.home() / '.hermes/core-v2'
 HOST = os.getenv('HERMES_CORE_API_HOST', '127.0.0.1')
@@ -44,12 +47,12 @@ def _read_body(handler: BaseHTTPRequestHandler) -> dict:
 
 
 def _run_core(message: str) -> tuple[int,str]:
-    p = subprocess.run([str(ROOT/'venv/bin/python'), str(ROOT/'hermes_core.py'), message], text=True, capture_output=True, timeout=30, cwd=str(ROOT))
+    p = subprocess.run([str(ROOT/'venv/bin/python'), str(ROOT/'hermes_core.py'), message], text=True, capture_output=True, timeout=40, cwd=str(ROOT))
     return p.returncode, (p.stdout or p.stderr or '').strip()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'HermesCoreAPI/3.3'
+    server_version = 'HermesCoreAPI/3.4'
     def log_message(self, fmt: str, *args) -> None: return
     def _guard(self) -> bool:
         if not _auth_ok(self): _json(self,401,{'ok':False,'error':'unauthorized'}); return False
@@ -58,7 +61,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._guard(): return
         path = urlparse(self.path).path
-        if path == '/health': _json(self,200,{'ok':True,'version':'3.3','api':'active','mode':'autonomous-personal-agent'})
+        if path == '/health': _json(self,200,{'ok':True,'version':'3.4','api':'active','mode':'autonomous-goal-execution'})
         elif path == '/events': _json(self,200,{'ok':True,'events':recent_events(100)})
         elif path == '/memory': _json(self,200,{'ok':True,'memory':recent_memory(100)})
         elif path == '/incidents': _json(self,200,{'ok':True,'incidents':recent_incidents(100)})
@@ -73,6 +76,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/brief/today': _json(self,200,{'ok':True,'brief':daily_brief()})
         elif path == '/brief/week': _json(self,200,{'ok':True,'brief':weekly_review()})
         elif path == '/proactive': _json(self,200,{'ok':True,'settings':proactive_settings()})
+        elif path == '/autonomy': _json(self,200,{'ok':True,'settings':autonomy_settings(),'capabilities':capability_summary()})
+        elif path == '/actions': _json(self,200,{'ok':True,'actions':list_actions(None,100)})
         else: _json(self,404,{'ok':False,'error':'not_found'})
 
     def do_POST(self) -> None:
@@ -89,6 +94,17 @@ class Handler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired: _json(self,504,{'ok':False,'error':'core_timeout'})
         elif path == '/proactive/enable': _json(self,200,{'ok':True,'settings':enable_proactive()})
         elif path == '/proactive/disable': _json(self,200,{'ok':True,'settings':disable_proactive()})
+        elif path == '/autonomy/enable': _json(self,200,{'ok':True,'settings':enable_autonomy()})
+        elif path == '/autonomy/disable': _json(self,200,{'ok':True,'settings':disable_autonomy()})
+        elif path == '/autonomy/run': _json(self,200,{'ok':True,'report':run_cycle()})
+        elif path == '/actions/approve':
+            ref=str(body.get('ref') or '').strip()
+            try: _json(self,200,{'ok':True,'action':approve_and_execute(ref)})
+            except KeyError: _json(self,404,{'ok':False,'error':'action_not_found'})
+        elif path == '/actions/reject':
+            ref=str(body.get('ref') or '').strip()
+            try: _json(self,200,{'ok':True,'action':reject_action(ref)})
+            except KeyError: _json(self,404,{'ok':False,'error':'action_not_found'})
         elif path == '/projects':
             try: _json(self,200,{'ok':True,'project':upsert_project(dict(body))})
             except Exception as exc: _json(self,400,{'ok':False,'error':str(exc)})
@@ -115,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f'Hermes Core API 3.3 listening on http://{HOST}:{PORT}', flush=True); server.serve_forever(); return 0
+    print(f'Hermes Core API 3.4 listening on http://{HOST}:{PORT}', flush=True); server.serve_forever(); return 0
 
 
 if __name__ == '__main__': raise SystemExit(main())
