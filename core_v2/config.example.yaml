@@ -2,7 +2,7 @@ llm:
   base_url: http://127.0.0.1:8088/v1
   model: Qwen3-1.7B-Q4_K_M.gguf
   timeout_seconds: 120
-  max_tokens: 320
+  max_tokens: 900
 agent:
   max_steps: 6
   local_first: true
