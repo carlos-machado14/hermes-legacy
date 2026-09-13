@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 SCRIPTS="$HOME/.hermes/scripts"
 
-log() { printf '[core-v3.0] %s\n' "$*"; }
+log() { printf '[core-v3.1] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -29,7 +29,8 @@ for file in \
   memory_store.py action_executor.py tool_registry.py recovery_engine.py event_bus.py \
   project_registry.py incident_store.py watcher_engine.py api_server.py \
   project_ops.py project_commands.py goal_manager.py task_manager.py personal_memory.py \
-  skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py; do
+  skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py \
+  onboarding_parser.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -121,12 +122,13 @@ systemctl --user restart hermes-core-health.service hermes-core-watchers.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, agent_router; print("dependencias Core v3 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, agent_router; print("dependencias Core v3.1 OK")'
 )
 
 log "Validando API..."; sleep 1; curl -fsS http://127.0.0.1:8090/health >/dev/null
-log "Hermes Core v3 instalado/atualizado em $TARGET"
+log "Hermes Core v3.1 instalado/atualizado em $TARGET"
 echo "Estado pessoal preservado em: $TARGET/state"
 echo "Config pessoal preservada em: $TARGET/config.yaml"
+echo "Onboarding longo em uma unica mensagem: habilitado"
 echo "API local: http://127.0.0.1:8090"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
