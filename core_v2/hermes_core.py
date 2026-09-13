@@ -8,6 +8,8 @@ from planner import classify as classify_plan, execute as execute_plan, compact_
 from memory_store import recent as memory_recent
 from recovery_engine import recover_once, history as recovery_history
 from tool_registry import call as call_tool, list_tools
+from project_registry import public_summary as project_summary
+from incident_store import recent_incidents
 
 ROOT = Path(__file__).resolve().parent
 CFG = ROOT / 'config.yaml'
@@ -29,6 +31,9 @@ SERVICE_ALIASES = {
     'modelo': 'hermes-local-llm.service',
     'health': 'hermes-core-health.service',
     'monitor': 'hermes-core-health.service',
+    'watcher': 'hermes-core-watchers.service',
+    'watchers': 'hermes-core-watchers.service',
+    'api': 'hermes-core-api.service',
 }
 
 
@@ -81,6 +86,8 @@ def local_status() -> dict:
         'gateway': service_state('hermes-gateway.service'),
         'router': service_state('hermes-fast-router.service'),
         'health_monitor': service_state('hermes-core-health.service'),
+        'watchers': service_state('hermes-core-watchers.service'),
+        'core_api': service_state('hermes-core-api.service'),
     }
     try:
         with httpx.Client(timeout=3) as client:
@@ -96,15 +103,16 @@ def local_status() -> dict:
 
 def format_health(data: dict) -> str:
     services = data.get('services', {})
-    service_ok = all(services.get(k) == 'active' for k in ('llm', 'gateway', 'router'))
+    required = ('llm', 'gateway', 'router', 'health_monitor', 'watchers', 'core_api')
+    service_ok = all(services.get(k) == 'active' for k in required)
     overall = 'OK' if service_ok and data.get('llm_ready') else 'ATENCAO'
     return (
         f'Hermes VPS: {overall}\n'
         f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% ({data['ram_available_mb']} MB livres) | "
         f"Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
         f"Load: {data['load']} | Uptime: {data['uptime_hours']}h\n"
-        f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')} | "
-        f"Health: {services.get('health_monitor')}\n"
+        f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')}\n"
+        f"Health: {services.get('health_monitor')} | Watchers: {services.get('watchers')} | API: {services.get('core_api')}\n"
         f"LLM HTTP: {data.get('llm_http')} | Modelo pronto: {'sim' if data.get('llm_ready') else 'nao'}"
     )
 
@@ -121,6 +129,10 @@ def route(text: str) -> str:
         return 'cron_status'
     if any(k in t for k in ('listar crons', 'lista de crons', 'cron list')):
         return 'cron_list'
+    if any(k in t for k in ('quais projetos', 'listar projetos', 'liste os projetos', 'meus projetos')):
+        return 'projects'
+    if any(k in t for k in ('incidentes', 'incidentes recentes', 'problemas recentes', 'falhas recentes')):
+        return 'incidents'
     if 'logs do gateway' in t or 'log do gateway' in t:
         return 'gateway_logs'
     if 'logs do llm' in t or 'log do llm' in t or 'logs do modelo' in t:
@@ -181,6 +193,32 @@ def _format_history(rows: list[dict]) -> str:
     return '\n'.join(out)
 
 
+def _format_projects() -> str:
+    projects = project_summary()
+    if not projects:
+        return 'Nenhum projeto cadastrado ainda. Use a API local POST /projects para cadastrar.'
+    out = ['Projetos cadastrados:']
+    for p in projects:
+        parts = [str(p.get('name'))]
+        if p.get('health_url'):
+            parts.append(f"health={p['health_url']}")
+        if p.get('services'):
+            parts.append(f"servicos={len(p['services'])}")
+        out.append('- ' + ' | '.join(parts))
+    return '\n'.join(out)
+
+
+def _format_incidents() -> str:
+    rows = recent_incidents(10)
+    if not rows:
+        return 'Nenhum incidente registrado.'
+    out = ['Incidentes recentes:']
+    for item in rows:
+        stamp = time.strftime('%d/%m %H:%M', time.localtime(int(item.get('ts', 0))))
+        out.append(f"- {stamp} [{item.get('severity', 'warning')}] {item.get('summary', 'incidente')}")
+    return '\n'.join(out)
+
+
 def _safe_direct_action(text: str) -> str | None:
     t = text.lower().strip()
     if any(k in t for k in ('corrija tudo', 'corrigir tudo', 'recupere os servicos', 'recupere os serviços', 'auto recovery', 'auto-recovery')):
@@ -207,6 +245,10 @@ def ask(text: str) -> str:
     r = route(text)
     if r == 'health':
         return format_health(local_status())
+    if r == 'projects':
+        return _format_projects()
+    if r == 'incidents':
+        return _format_incidents()
     if r in {'services', 'docker', 'cron_status', 'cron_list', 'gateway_logs', 'llm_logs', 'router_logs'}:
         return pretty(run_tool(r))
     return llm(text)
@@ -216,7 +258,7 @@ def main() -> int:
     if len(sys.argv) > 1:
         print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
-    print('Hermes Core v2.1 - local-first autonomous', flush=True)
+    print('Hermes Core v2.2 - local-first autonomous', flush=True)
     while True:
         try:
             text = input('\nVoce > ').strip()
