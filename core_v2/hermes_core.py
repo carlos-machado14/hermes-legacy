@@ -4,6 +4,7 @@ import json, os, subprocess, sys, time
 from pathlib import Path
 import httpx, psutil, yaml
 from tools import run_tool, pretty
+from planner import classify as classify_plan, execute as execute_plan, compact_for_llm
 
 ROOT = Path(__file__).resolve().parent
 CFG = ROOT / 'config.yaml'
@@ -67,6 +68,7 @@ def local_status() -> dict:
         'llm': service_state('hermes-local-llm.service'),
         'gateway': service_state('hermes-gateway.service'),
         'router': service_state('hermes-fast-router.service'),
+        'health_monitor': service_state('hermes-core-health.service'),
     }
     try:
         with httpx.Client(timeout=3) as client:
@@ -89,7 +91,8 @@ def format_health(data: dict) -> str:
         f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% ({data['ram_available_mb']} MB livres) | "
         f"Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
         f"Load: {data['load']} | Uptime: {data['uptime_hours']}h\n"
-        f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')}\n"
+        f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')} | "
+        f"Health: {services.get('health_monitor')}\n"
         f"LLM HTTP: {data.get('llm_http')} | Modelo pronto: {'sim' if data.get('llm_ready') else 'nao'}"
     )
 
@@ -115,7 +118,25 @@ def route(text: str) -> str:
     return 'llm'
 
 
+def diagnose_with_plan(text: str, plan_name: str) -> str:
+    report = execute_plan(plan_name)
+    evidence = compact_for_llm(report)
+    prompt = (
+        'Analise somente as evidencias reais abaixo. Responda em portugues com: '
+        '1) causa mais provavel, 2) evidencias, 3) proxima acao segura. '
+        'Nao invente dados e seja curto.\n\n'
+        f'Pedido: {text}\n\nEvidencias:\n{evidence}'
+    )
+    try:
+        return llm(prompt)
+    except Exception:
+        return 'Diagnostico coletado, mas o LLM nao respondeu. Evidencias:\n' + pretty(report)
+
+
 def ask(text: str) -> str:
+    plan = classify_plan(text)
+    if plan:
+        return diagnose_with_plan(text, plan)
     r = route(text)
     if r == 'health':
         return format_health(local_status())
