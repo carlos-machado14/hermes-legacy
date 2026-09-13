@@ -52,12 +52,6 @@ def _allowlist_contains(raw: str, user_id: Any) -> bool:
 
 
 def _authorized(gateway: Any, source: Any) -> bool:
-    """Authorize safely across old and new Hermes Gateway versions.
-
-    pre_gateway_dispatch runs before the gateway's normal auth gate, so this helper
-    must fail closed. Newer Hermes exposes _is_user_authorized_for_source; older
-    installs do not, so we fall back to approved pairing and explicit allowlists.
-    """
     platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
     user_id = getattr(source, 'user_id', None)
     chat_id = getattr(source, 'chat_id', None)
@@ -119,7 +113,6 @@ def _authorized(gateway: Any, source: Any) -> bool:
 
 
 def _remember_channel(source: Any) -> None:
-    """Persist only the last authorized delivery channel, never credentials."""
     platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
     chat_id = str(getattr(source, 'chat_id', '') or '').strip()
     user_id = str(getattr(source, 'user_id', '') or '').strip()
@@ -128,12 +121,7 @@ def _remember_channel(source: Any) -> None:
     try:
         path = Path.home() / '.hermes' / 'core-v2' / 'state' / 'channel_state.json'
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            'platform': platform,
-            'chat_id': chat_id,
-            'user_id': user_id,
-            'updated_at': int(time.time()),
-        }
+        payload = {'platform': platform, 'chat_id': chat_id, 'user_id': user_id, 'updated_at': int(time.time())}
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
         logger.info("fastpath remembered proactive channel platform=%s chat=%s", platform, chat_id)
     except Exception as exc:
@@ -145,10 +133,7 @@ def _run_core(text: str) -> str:
     py = root / 'venv' / 'bin' / 'python'
     core = root / 'hermes_core.py'
     logger.info("fastpath -> core text=%r", text[:180])
-    proc = subprocess.run(
-        [str(py), str(core), text], text=True, capture_output=True,
-        timeout=40, cwd=str(root),
-    )
+    proc = subprocess.run([str(py), str(core), text], text=True, capture_output=True, timeout=40, cwd=str(root))
     logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
     if proc.returncode != 0:
         return f"⚠️ Hermes Core retornou erro: {(proc.stderr or proc.stdout)[-800:].strip()}"
@@ -161,10 +146,7 @@ def _run_cron(text: str) -> str:
     manager = root / 'cron_manager.py'
     encoded = base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
     logger.info("fastpath -> cron text=%r", text[:180])
-    proc = subprocess.run(
-        [str(py), str(manager), '--text-b64', encoded], text=True,
-        capture_output=True, timeout=30, cwd=str(root),
-    )
+    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=30, cwd=str(root))
     raw = (proc.stdout or '').strip()
     logger.info("fastpath cron rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(raw), len(proc.stderr or ''))
     if proc.returncode != 0:
@@ -175,19 +157,57 @@ def _run_cron(text: str) -> str:
     return raw or 'Cron Manager concluiu sem mensagem.'
 
 
+def _split_message(text: str, limit: int = 3600) -> list[str]:
+    text = (text or '').strip()
+    if not text:
+        return ['Hermes Core concluiu a ação sem mensagem.']
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining.strip())
+            break
+        cut = remaining.rfind('\n\n', 0, limit)
+        if cut < limit // 2:
+            cut = remaining.rfind('\n', 0, limit)
+        if cut < limit // 2:
+            cut = remaining.rfind(' ', 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].lstrip()
+
+    if len(chunks) <= 1:
+        return chunks
+    total = len(chunks)
+    return [f"[{i}/{total}]\n{chunk}" for i, chunk in enumerate(chunks, 1)]
+
+
+async def _send_all(adapter: Any, chat_id: Any, chunks: list[str]) -> None:
+    for index, chunk in enumerate(chunks, 1):
+        await adapter.send(chat_id, chunk)
+        logger.info("fastpath reply chunk sent chat=%s part=%s/%s chars=%s", chat_id, index, len(chunks), len(chunk))
+        if index < len(chunks):
+            await asyncio.sleep(0.15)
+
+
 def _schedule_send(gateway: Any, source: Any, text: str) -> None:
     try:
         adapter = gateway._adapter_for_source(source)
         if adapter is None:
             logger.error("fastpath send failed: adapter ausente")
             return
-        coro = adapter.send(source.chat_id, text)
+        chunks = _split_message(text)
+        coro = _send_all(adapter, source.chat_id, chunks)
         try:
             asyncio.get_running_loop().create_task(coro)
-            logger.info("fastpath reply scheduled on running loop chat=%s chars=%s", source.chat_id, len(text))
+            logger.info("fastpath reply scheduled chat=%s chunks=%s chars=%s", source.chat_id, len(chunks), len(text))
         except RuntimeError:
             asyncio.run(coro)
-            logger.info("fastpath reply sent with asyncio.run chat=%s chars=%s", source.chat_id, len(text))
+            logger.info("fastpath reply sent with asyncio.run chat=%s chunks=%s chars=%s", source.chat_id, len(chunks), len(text))
     except Exception as exc:
         logger.exception("fastpath send failed: %s", exc)
 
@@ -210,7 +230,6 @@ def pre_gateway_dispatch(**kwargs):
         return None
 
     _remember_channel(source)
-
     if text.startswith('/'):
         logger.info("fastpath allow slash command=%r", text[:80])
         return None
@@ -230,5 +249,5 @@ def pre_gateway_dispatch(**kwargs):
 
 
 def register(ctx):
-    logger.warning("HERMES CORE FASTPATH v1.2.0 REGISTERED")
+    logger.warning("HERMES CORE FASTPATH v1.2.1 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
