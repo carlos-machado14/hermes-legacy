@@ -8,22 +8,21 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 log() { printf '[core-v2] %s\n' "$*"; }
 
 ensure_venv_support() {
-  local pyver pkg
+  local pyver pkg probe
   pyver="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   pkg="python${pyver}-venv"
-
-  # Debian/Ubuntu can ship the venv module without ensurepip. Test an actual venv.
-  local probe
   probe="$(mktemp -d)"
-  if "$PYTHON_BIN" -m venv "$probe/test" >/dev/null 2>&1; then
+
+  if "$PYTHON_BIN" -m venv "$probe/test" >/dev/null 2>&1 \
+    && "$probe/test/bin/python" -m pip --version >/dev/null 2>&1; then
     rm -rf "$probe"
     return 0
   fi
   rm -rf "$probe"
 
-  log "Suporte a venv/ensurepip ausente. Instalando $pkg..."
+  log "Suporte completo a venv/pip ausente. Instalando $pkg e python3-pip..."
   if ! command -v apt-get >/dev/null 2>&1; then
-    log "apt-get nao encontrado. Instale manualmente $pkg e rode novamente."
+    log "apt-get nao encontrado. Instale manualmente $pkg python3-pip e rode novamente."
     exit 1
   fi
 
@@ -50,15 +49,24 @@ fi
 
 ensure_venv_support
 
-# Remove a partially-created environment from a previous failed install.
-if [ -d "$TARGET/venv" ] && [ ! -x "$TARGET/venv/bin/python" ]; then
-  log "Removendo venv incompleto da tentativa anterior..."
-  rm -rf "$TARGET/venv"
+# Recreate any environment that is missing either Python or pip.
+if [ -d "$TARGET/venv" ]; then
+  if [ ! -x "$TARGET/venv/bin/python" ] \
+    || ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    log "Removendo venv incompleto/quebrado..."
+    rm -rf "$TARGET/venv"
+  fi
 fi
 
 if [ ! -x "$TARGET/venv/bin/python" ]; then
   log "Criando ambiente virtual..."
   "$PYTHON_BIN" -m venv "$TARGET/venv"
+fi
+
+# Last-resort bootstrap for unusual Debian/Ubuntu images.
+if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+  log "pip ainda ausente no venv; tentando ensurepip..."
+  "$TARGET/venv/bin/python" -m ensurepip --upgrade
 fi
 
 log "Instalando dependencias..."
