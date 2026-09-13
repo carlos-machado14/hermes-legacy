@@ -8,6 +8,7 @@ from opportunity_hunter import hunt_and_register
 from deep_research import format_report
 from learning_engine import record_outcome, summary as learning_summary
 from decision_log import record
+from site_sales_workflow import configure_for_primary_goal, summary as site_strategy_summary
 
 
 def _after(text: str, markers: tuple[str, ...]) -> str:
@@ -22,6 +23,10 @@ def handle(text: str) -> str | None:
     t=text.strip(); low=t.lower()
     if low in {'crm','meu crm','pipeline','pipeline de vendas','meus leads','listar leads'}:
         return crm_summary() if low not in {'meus leads','listar leads'} else leads_summary()
+    if any(k in low for k in ('minha estratégia de sites','minha estrategia de sites','rotina diária de sites','rotina diaria de sites','workflow de sites','estratégia diária de sites','estrategia diaria de sites')):
+        return site_strategy_summary()
+    if any(k in low for k in ('ative estratégia diária de sites','ative estrategia diaria de sites','configurar rotina diária de sites','configurar rotina diaria de sites')):
+        return configure_for_primary_goal()
     if any(k in low for k in ('leads mais quentes','leads quentes','melhores leads')):
         rows=hot_leads(8)
         if not rows: return 'Nenhum lead qualificado ainda.'
