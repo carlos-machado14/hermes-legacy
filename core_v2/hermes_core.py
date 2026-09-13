@@ -10,6 +10,7 @@ from recovery_engine import recover_once, history as recovery_history
 from tool_registry import call as call_tool, list_tools
 from project_registry import public_summary as project_summary
 from incident_store import recent_incidents
+from project_commands import handle as handle_project_command
 
 ROOT = Path(__file__).resolve().parent
 CFG = ROOT / 'config.yaml'
@@ -196,7 +197,7 @@ def _format_history(rows: list[dict]) -> str:
 def _format_projects() -> str:
     projects = project_summary()
     if not projects:
-        return 'Nenhum projeto cadastrado ainda. Use a API local POST /projects para cadastrar.'
+        return 'Nenhum projeto cadastrado ainda.'
     out = ['Projetos cadastrados:']
     for p in projects:
         parts = [str(p.get('name'))]
@@ -236,6 +237,9 @@ def _safe_direct_action(text: str) -> str | None:
 
 
 def ask(text: str) -> str:
+    project_reply = handle_project_command(text)
+    if project_reply is not None:
+        return project_reply
     direct = _safe_direct_action(text)
     if direct is not None:
         return direct
@@ -258,7 +262,7 @@ def main() -> int:
     if len(sys.argv) > 1:
         print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
-    print('Hermes Core v2.2 - local-first autonomous', flush=True)
+    print('Hermes Core v2.3 - local-first autonomous', flush=True)
     while True:
         try:
             text = input('\nVoce > ').strip()
