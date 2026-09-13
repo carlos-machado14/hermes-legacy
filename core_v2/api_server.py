@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
-import os
-import subprocess
+import json, os, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -13,121 +11,100 @@ from incident_store import recent_incidents
 from memory_store import recent as recent_memory
 from project_registry import list_projects, upsert_project, remove_project
 from project_ops import project_status, restart_project
+from goal_manager import list_goals, create_goal
+from task_manager import list_tasks, create_task, complete_task
+from opportunity_engine import list_items as list_opportunities, add as add_opportunity
+from personal_memory import profile as personal_profile
+from skill_registry import list_skills
 
-ROOT = Path.home() / ".hermes/core-v2"
-HOST = os.getenv("HERMES_CORE_API_HOST", "127.0.0.1")
-PORT = int(os.getenv("HERMES_CORE_API_PORT", "8090"))
-TOKEN = os.getenv("HERMES_CORE_API_TOKEN", "").strip()
+ROOT = Path.home() / '.hermes/core-v2'
+HOST = os.getenv('HERMES_CORE_API_HOST', '127.0.0.1')
+PORT = int(os.getenv('HERMES_CORE_API_PORT', '8090'))
+TOKEN = os.getenv('HERMES_CORE_API_TOKEN', '').strip()
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int, payload: dict | list) -> None:
-    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    handler.send_response(status); handler.send_header('Content-Type','application/json; charset=utf-8'); handler.send_header('Content-Length',str(len(raw))); handler.end_headers(); handler.wfile.write(raw)
 
 
 def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
-    if not TOKEN:
-        return True
-    value = handler.headers.get("Authorization", "")
-    return value == f"Bearer {TOKEN}"
+    if not TOKEN: return True
+    return handler.headers.get('Authorization','') == f'Bearer {TOKEN}'
 
 
 def _read_body(handler: BaseHTTPRequestHandler) -> dict:
-    length = int(handler.headers.get("Content-Length", "0") or 0)
-    if length <= 0:
-        return {}
-    raw = handler.rfile.read(min(length, 1024 * 1024))
-    return json.loads(raw.decode("utf-8"))
+    length = int(handler.headers.get('Content-Length','0') or 0)
+    if length <= 0: return {}
+    return json.loads(handler.rfile.read(min(length, 1024*1024)).decode('utf-8'))
 
 
-def _run_core(message: str) -> tuple[int, str]:
-    py = ROOT / "venv/bin/python"
-    core = ROOT / "hermes_core.py"
-    p = subprocess.run([str(py), str(core), message], text=True, capture_output=True, timeout=30, cwd=str(ROOT))
-    text = (p.stdout or p.stderr or "").strip()
-    return p.returncode, text
+def _run_core(message: str) -> tuple[int,str]:
+    p = subprocess.run([str(ROOT/'venv/bin/python'), str(ROOT/'hermes_core.py'), message], text=True, capture_output=True, timeout=30, cwd=str(ROOT))
+    return p.returncode, (p.stdout or p.stderr or '').strip()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesCoreAPI/2.3"
-
-    def log_message(self, fmt: str, *args) -> None:
-        return
-
+    server_version = 'HermesCoreAPI/3.0'
+    def log_message(self, fmt: str, *args) -> None: return
     def _guard(self) -> bool:
-        if not _auth_ok(self):
-            _json(self, 401, {"ok": False, "error": "unauthorized"})
-            return False
+        if not _auth_ok(self): _json(self,401,{'ok':False,'error':'unauthorized'}); return False
         return True
 
     def do_GET(self) -> None:
-        if not self._guard():
-            return
+        if not self._guard(): return
         path = urlparse(self.path).path
-        if path == "/health":
-            _json(self, 200, {"ok": True, "version": "2.3", "api": "active"})
-        elif path == "/events":
-            _json(self, 200, {"ok": True, "events": recent_events(100)})
-        elif path == "/memory":
-            _json(self, 200, {"ok": True, "memory": recent_memory(100)})
-        elif path == "/incidents":
-            _json(self, 200, {"ok": True, "incidents": recent_incidents(100)})
-        elif path == "/projects":
-            _json(self, 200, {"ok": True, "projects": list_projects()})
-        else:
-            _json(self, 404, {"ok": False, "error": "not_found"})
+        if path == '/health': _json(self,200,{'ok':True,'version':'3.0','api':'active','mode':'personal-agent'})
+        elif path == '/events': _json(self,200,{'ok':True,'events':recent_events(100)})
+        elif path == '/memory': _json(self,200,{'ok':True,'memory':recent_memory(100)})
+        elif path == '/incidents': _json(self,200,{'ok':True,'incidents':recent_incidents(100)})
+        elif path == '/projects': _json(self,200,{'ok':True,'projects':list_projects()})
+        elif path == '/goals': _json(self,200,{'ok':True,'goals':list_goals()})
+        elif path == '/tasks': _json(self,200,{'ok':True,'tasks':list_tasks()})
+        elif path == '/opportunities': _json(self,200,{'ok':True,'opportunities':list_opportunities(None)})
+        elif path == '/profile': _json(self,200,{'ok':True,'profile':personal_profile()})
+        elif path == '/skills': _json(self,200,{'ok':True,'skills':list_skills()})
+        else: _json(self,404,{'ok':False,'error':'not_found'})
 
     def do_POST(self) -> None:
-        if not self._guard():
-            return
+        if not self._guard(): return
         path = urlparse(self.path).path
-        try:
-            body = _read_body(self)
-        except Exception as exc:
-            _json(self, 400, {"ok": False, "error": f"invalid_json: {exc}"})
-            return
+        try: body = _read_body(self)
+        except Exception as exc: _json(self,400,{'ok':False,'error':f'invalid_json: {exc}'}); return
 
-        if path == "/message":
-            message = str(body.get("message") or "").strip()
-            if not message:
-                _json(self, 400, {"ok": False, "error": "message_required"})
-                return
+        if path == '/message':
+            message = str(body.get('message') or '').strip()
+            if not message: _json(self,400,{'ok':False,'error':'message_required'}); return
             try:
-                code, reply = _run_core(message)
-                _json(self, 200 if code == 0 else 500, {"ok": code == 0, "reply": reply})
-            except subprocess.TimeoutExpired:
-                _json(self, 504, {"ok": False, "error": "core_timeout"})
-        elif path == "/projects":
-            try:
-                project = upsert_project(dict(body))
-                _json(self, 200, {"ok": True, "project": project})
-            except Exception as exc:
-                _json(self, 400, {"ok": False, "error": str(exc)})
-        elif path == "/projects/remove":
-            name = str(body.get("name") or "").strip()
-            _json(self, 200, {"ok": True, "removed": remove_project(name) if name else False})
-        elif path == "/projects/status":
-            name = str(body.get("name") or "").strip()
-            report = project_status(name) if name else {"ok": False, "error": "name_required"}
-            _json(self, 200 if report.get("ok") else 404 if report.get("error") == "project_not_found" else 400, report)
-        elif path == "/projects/restart":
-            name = str(body.get("name") or "").strip()
-            report = restart_project(name) if name else {"ok": False, "error": "name_required"}
-            _json(self, 200 if report.get("ok") else 409, report)
-        else:
-            _json(self, 404, {"ok": False, "error": "not_found"})
+                code, reply = _run_core(message); _json(self,200 if code == 0 else 500,{'ok':code == 0,'reply':reply})
+            except subprocess.TimeoutExpired: _json(self,504,{'ok':False,'error':'core_timeout'})
+        elif path == '/projects':
+            try: _json(self,200,{'ok':True,'project':upsert_project(dict(body))})
+            except Exception as exc: _json(self,400,{'ok':False,'error':str(exc)})
+        elif path == '/projects/remove':
+            name=str(body.get('name') or '').strip(); _json(self,200,{'ok':True,'removed':remove_project(name) if name else False})
+        elif path == '/projects/status':
+            name=str(body.get('name') or '').strip(); report=project_status(name) if name else {'ok':False,'error':'name_required'}; _json(self,200 if report.get('ok') else 400,report)
+        elif path == '/projects/restart':
+            name=str(body.get('name') or '').strip(); report=restart_project(name) if name else {'ok':False,'error':'name_required'}; _json(self,200 if report.get('ok') else 409,report)
+        elif path == '/goals':
+            try: _json(self,200,{'ok':True,'goal':create_goal(str(body.get('title') or ''), target_value=body.get('target_value'), target_unit=body.get('target_unit'), deadline=body.get('deadline'), category=str(body.get('category') or 'general'), notes=str(body.get('notes') or ''))})
+            except Exception as exc: _json(self,400,{'ok':False,'error':str(exc)})
+        elif path == '/tasks':
+            try: _json(self,200,{'ok':True,'task':create_task(str(body.get('title') or ''), goal_id=body.get('goal_id'), priority=str(body.get('priority') or 'medium'), due=body.get('due'))})
+            except Exception as exc: _json(self,400,{'ok':False,'error':str(exc)})
+        elif path == '/tasks/complete':
+            try: _json(self,200,{'ok':True,'task':complete_task(str(body.get('ref') or ''))})
+            except Exception as exc: _json(self,404,{'ok':False,'error':str(exc)})
+        elif path == '/opportunities':
+            try: _json(self,200,{'ok':True,'opportunity':add_opportunity(str(body.get('title') or ''), source=str(body.get('source') or 'api'), revenue_score=int(body.get('revenue_score',5)), speed_score=int(body.get('speed_score',5)), fit_score=int(body.get('fit_score',5)), cost_score=int(body.get('cost_score',5)), risk_score=int(body.get('risk_score',5)), notes=str(body.get('notes') or ''))})
+            except Exception as exc: _json(self,400,{'ok':False,'error':str(exc)})
+        else: _json(self,404,{'ok':False,'error':'not_found'})
 
 
 def main() -> int:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Hermes Core API 2.3 listening on http://{HOST}:{PORT}", flush=True)
-    server.serve_forever()
-    return 0
+    print(f'Hermes Core API 3.0 listening on http://{HOST}:{PORT}', flush=True); server.serve_forever(); return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__ == '__main__': raise SystemExit(main())
