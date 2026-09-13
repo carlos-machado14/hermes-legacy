@@ -26,9 +26,41 @@ CRON_RE = re.compile(
     re.IGNORECASE,
 )
 
+CONTINUE_RE = re.compile(
+    r"^(?:sim[,.! ]*)?(?:continue|continua|continuar|pode continuar|pode seguir|siga|segue|prossiga)[.! ]*$",
+    re.IGNORECASE,
+)
+
 _JOB_QUEUE: queue.Queue[tuple[Any, Any, str, bool]] = queue.Queue(maxsize=100)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
+_ACTIVE_CHATS: set[str] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def _chat_key(source: Any) -> str:
+    platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
+    chat_id = str(getattr(source, 'chat_id', '') or '').strip()
+    return f"{platform}:{chat_id}" if chat_id else ''
+
+
+def _set_active(source: Any, active: bool) -> None:
+    key = _chat_key(source)
+    if not key:
+        return
+    with _ACTIVE_LOCK:
+        if active:
+            _ACTIVE_CHATS.add(key)
+        else:
+            _ACTIVE_CHATS.discard(key)
+
+
+def _is_active(source: Any) -> bool:
+    key = _chat_key(source)
+    if not key:
+        return False
+    with _ACTIVE_LOCK:
+        return key in _ACTIVE_CHATS
 
 
 def _env_value(name: str) -> str:
@@ -141,7 +173,7 @@ def _run_core(text: str) -> str:
     logger.info("fastpath -> conversational core text=%r", text[:180])
     proc = subprocess.run(
         [str(py), str(core), text], text=True, capture_output=True,
-        timeout=150, cwd=str(root),
+        timeout=900, cwd=str(root),
     )
     logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
     if proc.returncode != 0:
@@ -155,7 +187,7 @@ def _run_cron(text: str) -> str:
     manager = root / 'cron_manager.py'
     encoded = base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
     logger.info("fastpath -> cron text=%r", text[:180])
-    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=90, cwd=str(root))
+    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=300, cwd=str(root))
     raw = (proc.stdout or '').strip()
     logger.info("fastpath cron rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(raw), len(proc.stderr or ''))
     if proc.returncode != 0:
@@ -221,26 +253,43 @@ def _schedule_send(gateway: Any, source: Any, text: str) -> None:
         logger.exception("fastpath send failed: %s", exc)
 
 
-def _slow_notice(gateway: Any, source: Any, done: threading.Event) -> None:
+def _progress_notices(gateway: Any, source: Any, done: threading.Event) -> None:
     if done.wait(8):
         return
-    _schedule_send(gateway, source, 'Estou analisando isso. Se levar um pouco mais, vou concluir aqui sem perder o contexto.')
+    _schedule_send(
+        gateway,
+        source,
+        'Estou trabalhando nisso e vou continuar automaticamente até concluir. Você não precisa enviar “continue”.',
+    )
+    elapsed = 8
+    while not done.wait(60):
+        elapsed += 60
+        _schedule_send(
+            gateway,
+            source,
+            f'A tarefa continua em execução ({elapsed // 60} min). Vou seguir sozinho até finalizar e te enviar o resultado.',
+        )
 
 
 def _process_job(gateway: Any, source: Any, text: str, is_cron: bool) -> None:
     done = threading.Event()
-    notice = threading.Thread(target=_slow_notice, args=(gateway, source, done), daemon=True)
+    _set_active(source, True)
+    notice = threading.Thread(target=_progress_notices, args=(gateway, source, done), daemon=True)
     notice.start()
     try:
         reply = _run_cron(text) if is_cron else _run_core(text)
     except subprocess.TimeoutExpired:
         logger.exception("fastpath local execution reached hard safety limit")
-        reply = 'Não consegui concluir essa análise automaticamente. O contexto foi preservado; posso retomar a partir daqui.'
+        reply = (
+            'Essa tarefa ultrapassou o limite de segurança de execução contínua. '
+            'O contexto foi preservado para recuperação, mas não vou fingir que ela terminou.'
+        )
     except Exception as exc:
         logger.exception("fastpath local execution failed: %s", exc)
         reply = f'Não consegui concluir essa resposta agora. O contexto foi preservado. Detalhe: {exc}'
     finally:
         done.set()
+        _set_active(source, False)
     _schedule_send(gateway, source, reply)
 
 
@@ -287,6 +336,15 @@ def pre_gateway_dispatch(**kwargs):
         logger.info("fastpath allow slash command=%r", text[:80])
         return None
 
+    if CONTINUE_RE.match(text) and _is_active(source):
+        _schedule_send(
+            gateway,
+            source,
+            'Já estou executando a tarefa anterior e vou continuar automaticamente até finalizar. Não precisa enviar “continue”.',
+        )
+        logger.info("fastpath ignored duplicate continue while chat has active job chat=%s", getattr(source, 'chat_id', None))
+        return {'action': 'skip', 'reason': 'active-job-already-continuing'}
+
     _ensure_worker()
     try:
         _JOB_QUEUE.put_nowait((gateway, source, text, bool(CRON_RE.search(text))))
@@ -300,5 +358,5 @@ def pre_gateway_dispatch(**kwargs):
 
 def register(ctx):
     _ensure_worker()
-    logger.warning("HERMES CORE FASTPATH v1.4.0 REGISTERED")
+    logger.warning("HERMES CORE FASTPATH v1.5.0 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
