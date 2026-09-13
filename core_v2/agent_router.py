@@ -14,8 +14,8 @@ from onboarding_parser import process as process_onboarding
 from proactive_engine import daily_brief, weekly_review, recommendation, continue_last, history as decision_history
 from proactive_settings import enable as enable_proactive, disable as disable_proactive, summary as proactive_summary
 from autonomy_settings import enable as enable_autonomy, disable as disable_autonomy, summary as autonomy_summary
-from goal_execution_engine import run_cycle, summary as autonomous_actions_summary, capability_summary, approve_and_execute
-from action_queue import reject as reject_action
+from goal_execution_engine import run_cycle, summary as autonomous_actions_summary, capability_summary, approve_and_execute, release_safe_pending
+from action_queue import reject as reject_action, list_actions
 from decision_log import record
 
 
@@ -93,6 +93,18 @@ def _format_cycle(report: dict) -> str:
     return '\n'.join(out)
 
 
+def _approval_help() -> str:
+    rows = list_actions('pending_approval', 20)
+    if not rows:
+        return 'Não há nenhuma ação aguardando aprovação agora.'
+    out = ['Existem várias ações aguardando aprovação. Para segurança, preciso saber qual delas você quer aprovar:']
+    for a in rows[:10]:
+        out.append(f"- [{a.get('id')}] {a.get('title')}")
+    out.append('Envie: aprovar ação <ID>')
+    out.append('Para liberar apenas ações internas que não têm efeito externo, envie: liberar ações internas')
+    return '\n'.join(out)
+
+
 def handle(text: str) -> str | None:
     onboarding = process_onboarding(text)
     if onboarding is not None: return onboarding
@@ -110,13 +122,27 @@ def handle(text: str) -> str | None:
         return _format_cycle(run_cycle())
     if any(k in low for k in ('ações aguardando aprovação', 'acoes aguardando aprovacao', 'fila de ações', 'fila de acoes', 'ações autônomas', 'acoes autonomas')):
         return autonomous_actions_summary()
+
+    if low in {'aprovar ação', 'aprovar acao', 'aprovar'}:
+        return _approval_help()
+
+    if low in {'liberar ações internas', 'liberar acoes internas', 'aprovar ações internas', 'aprovar acoes internas'}:
+        report = release_safe_pending()
+        released = report.get('released') or []
+        kept = report.get('kept') or []
+        out = [f'Liberei {len(released)} ação(ões) internas de baixo risco sem exigir sua aprovação.']
+        if kept:
+            out.append(f'{len(kept)} ação(ões) com efeito externo continuam aguardando aprovação explícita.')
+        out.append('Vou executá-las automaticamente no próximo ciclo autônomo.')
+        return '\n'.join(out)
+
     if low.startswith('aprovar ação ') or low.startswith('aprovar acao '):
         ref = _after(t, ('aprovar ação', 'aprovar acao'))
         try:
             action = approve_and_execute(ref); record('autonomous_action_approved', action.get('title',''), metadata={'action_id':action.get('id')})
             result = str(action.get('result') or '').strip()
             return f"Ação [{action.get('id')}] processada: {action.get('status')}\n{result[:1800]}"
-        except KeyError: return 'Ação não encontrada.'
+        except KeyError: return 'Ação não encontrada. Confira o ID em "ações aguardando aprovação".'
     if low.startswith('rejeitar ação ') or low.startswith('rejeitar acao '):
         ref = _after(t, ('rejeitar ação', 'rejeitar acao'))
         try:
@@ -143,9 +169,6 @@ def handle(text: str) -> str | None:
         try: g = complete_goal(ref); record('goal_completed', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo concluído: {g['title']}"
         except KeyError: return 'Objetivo não encontrado.'
 
-    # Natural-language goal planning must stay deterministic. Previously phrases such
-    # as "plano do meu objetivo financeiro" fell through to the local LLM and could
-    # hit the fastpath timeout even though the goal already existed.
     if any(k in low for k in ('plano do meu objetivo financeiro', 'plano do objetivo financeiro', 'planeje meu objetivo financeiro', 'planejar meu objetivo financeiro')):
         return _plan_active_goal(money=True)
     if low in {'plano do meu objetivo', 'planeje meu objetivo', 'planejar meu objetivo'}:
