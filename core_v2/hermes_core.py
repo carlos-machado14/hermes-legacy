@@ -5,6 +5,9 @@ from pathlib import Path
 import httpx, psutil, yaml
 from tools import run_tool, pretty
 from planner import classify as classify_plan, execute as execute_plan, compact_for_llm
+from memory_store import recent as memory_recent
+from recovery_engine import recover_once, history as recovery_history
+from tool_registry import call as call_tool, list_tools
 
 ROOT = Path(__file__).resolve().parent
 CFG = ROOT / 'config.yaml'
@@ -18,6 +21,15 @@ BASE_URL = config['llm']['base_url'].rstrip('/')
 MODEL = config['llm']['model']
 TIMEOUT = config['llm'].get('timeout_seconds', 120)
 MAX_TOKENS = config['llm'].get('max_tokens', 320)
+
+SERVICE_ALIASES = {
+    'gateway': 'hermes-gateway.service',
+    'router': 'hermes-fast-router.service',
+    'llm': 'hermes-local-llm.service',
+    'modelo': 'hermes-local-llm.service',
+    'health': 'hermes-core-health.service',
+    'monitor': 'hermes-core-health.service',
+}
 
 
 def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
@@ -126,33 +138,20 @@ def deterministic_diagnosis(plan_name: str, report: dict) -> str | None:
     text = _report_text(report)
     if plan_name == 'diagnose_crons':
         if 'non-streaming api call timed out' in text or 'timed out after 900s' in text or 'provider timeout' in text:
-            return (
-                'Diagnostico rapido:\n'
-                '- Causa: as crons estao falhando por timeout durante a chamada ao modelo/API local.\n'
-                '- Evidencia: os logs registram timeout em chamadas non-streaming/900s.\n'
-                '- Estado: o scheduler/gateway esta ativo; o problema ocorre durante a execucao da tarefa.\n'
-                '- Acao recomendada: reduzir o trabalho enviado ao LLM nas crons e mover coleta/filtro para codigo deterministico.\n'
-                '- Proximo passo: migrar as crons para collectors locais + resumo curto no Qwen.'
-            )
+            return ('Diagnostico rapido:\n- Causa: as crons falharam por timeout durante chamada ao modelo/API.\n'
+                    '- O scheduler esta ativo; a falha foi de execucao.\n'
+                    '- As crons locais no-agent evitam esse gargalo.')
         if 'failed' in text and 'cron' in text:
-            return (
-                'Diagnostico rapido:\n'
-                '- Existem crons com falha registrada.\n'
-                '- O scheduler respondeu, entao a falha e de execucao, nao de agendamento.\n'
-                '- Consulte a ultima execucao e os logs do gateway/LLM para a causa especifica.'
-            )
+            return ('Diagnostico rapido:\n- Existem crons com falha registrada.\n'
+                    '- O scheduler respondeu; consulte a ultima execucao e os logs para a causa especifica.')
         if 'gateway is running' in text and 'active job' in text:
-            return (
-                'Diagnostico rapido:\n'
-                '- Scheduler e gateway estao ativos.\n'
-                '- Nao encontrei um padrao de erro conhecido nas evidencias coletadas.\n'
-                '- Proximo passo: inspecionar a ultima execucao de cada cron.'
-            )
+            return ('Diagnostico rapido:\n- Scheduler e gateway estao ativos.\n'
+                    '- Nao encontrei um padrao de erro conhecido nas evidencias coletadas.')
     if plan_name == 'diagnose_services':
         if 'inactive' in text or 'failed' in text:
-            return 'Diagnostico rapido: ha pelo menos um servico inativo ou com falha. Verifique o bloco de services e o journal correspondente.'
+            return 'Diagnostico rapido: ha pelo menos um servico inativo ou com falha.'
         if 'active' in text:
-            return 'Diagnostico rapido: os servicos principais estao ativos; nao ha falha basica de systemd nas evidencias coletadas.'
+            return 'Diagnostico rapido: os servicos principais estao ativos.'
     return None
 
 
@@ -162,18 +161,46 @@ def diagnose_with_plan(text: str, plan_name: str) -> str:
     if fast:
         return fast
     evidence = compact_for_llm(report, max_chars=2200)
-    prompt = (
-        'Analise somente as evidencias reais abaixo. Responda em portugues em no maximo 5 linhas: '
-        'causa provavel, evidencia principal e proxima acao segura. Nao invente dados.\n\n'
-        f'Pedido: {text}\nEvidencias:\n{evidence}'
-    )
+    prompt = ('Analise somente as evidencias reais abaixo. Responda em portugues em no maximo 5 linhas: '
+              'causa provavel, evidencia principal e proxima acao segura. Nao invente dados.\n\n'
+              f'Pedido: {text}\nEvidencias:\n{evidence}')
     try:
         return llm(prompt, max_tokens=120)
     except Exception:
         return 'Diagnostico coletado, mas o LLM nao respondeu. Evidencias:\n' + pretty(report)
 
 
+def _format_history(rows: list[dict]) -> str:
+    if not rows:
+        return 'Nenhuma acao de recuperacao registrada ainda.'
+    out = ['Historico operacional recente:']
+    for item in rows[-10:]:
+        stamp = time.strftime('%d/%m %H:%M', time.localtime(int(item.get('ts', 0))))
+        status = 'OK' if item.get('ok') is True else ('FALHA' if item.get('ok') is False else '-')
+        out.append(f"- {stamp} [{status}] {item.get('summary', item.get('kind', 'evento'))}")
+    return '\n'.join(out)
+
+
+def _safe_direct_action(text: str) -> str | None:
+    t = text.lower().strip()
+    if any(k in t for k in ('corrija tudo', 'corrigir tudo', 'recupere os servicos', 'recupere os serviços', 'auto recovery', 'auto-recovery')):
+        report = recover_once()
+        return 'Recovery executado:\n' + pretty(report)
+    if any(k in t for k in ('o que voce corrigiu', 'o que você corrigiu', 'historico de correcoes', 'histórico de correções', 'historico operacional', 'histórico operacional')):
+        return _format_history(recovery_history(20) or memory_recent(20, kind='action'))
+    if t in {'ferramentas', 'tools', 'listar ferramentas'} or 'quais ferramentas' in t:
+        return pretty(list_tools())
+    if t.startswith('reinicie ') or t.startswith('reiniciar '):
+        for alias, service in SERVICE_ALIASES.items():
+            if alias in t:
+                return pretty(call_tool('system.restart_service', {'service': service}))
+    return None
+
+
 def ask(text: str) -> str:
+    direct = _safe_direct_action(text)
+    if direct is not None:
+        return direct
     plan = classify_plan(text)
     if plan:
         return diagnose_with_plan(text, plan)
@@ -189,7 +216,7 @@ def main() -> int:
     if len(sys.argv) > 1:
         print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
-    print('Hermes Core v2 - local-first', flush=True)
+    print('Hermes Core v2.1 - local-first autonomous', flush=True)
     while True:
         try:
             text = input('\nVoce > ').strip()
