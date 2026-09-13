@@ -40,9 +40,10 @@ SERVICE_ALIASES = {
 
 
 def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    system = system or ('Voce e Hermes Core v3, um agente pessoal local-first. '
-                        'Ajude o usuario a atingir objetivos, executar tarefas e tomar decisoes. '
-                        'Nao invente resultados de ferramentas e priorize acoes concretas.')
+    system = system or ('Voce e Hermes Core v3.4, um agente pessoal local-first e orientado a objetivos. '
+                        'Use contexto persistente quando disponivel. Ajude o usuario a atingir objetivos, executar tarefas e tomar decisoes. '
+                        'Nao invente resultados de ferramentas e nao alegue ter executado acoes externas sem evidencia. '
+                        'Acoes externas relevantes devem respeitar o fluxo de aprovacao.')
     payload = {
         'model': MODEL,
         'messages': [
@@ -83,6 +84,7 @@ def local_status() -> dict:
         'llm': service_state('hermes-local-llm.service'), 'gateway': service_state('hermes-gateway.service'),
         'router': service_state('hermes-fast-router.service'), 'health_monitor': service_state('hermes-core-health.service'),
         'watchers': service_state('hermes-core-watchers.service'), 'core_api': service_state('hermes-core-api.service'),
+        'autonomous': service_state('hermes-core-autonomous.service'),
     }
     try:
         with httpx.Client(timeout=3) as client:
@@ -93,14 +95,14 @@ def local_status() -> dict:
 
 
 def format_health(data: dict) -> str:
-    services = data.get('services', {}); required = ('llm','gateway','router','health_monitor','watchers','core_api')
+    services = data.get('services', {}); required = ('llm','gateway','router','health_monitor','watchers','core_api','autonomous')
     overall = 'OK' if all(services.get(k) == 'active' for k in required) and data.get('llm_ready') else 'ATENCAO'
     return (
         f'Hermes VPS: {overall}\n'
         f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% ({data['ram_available_mb']} MB livres) | Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
         f"Load: {data['load']} | Uptime: {data['uptime_hours']}h\n"
         f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')}\n"
-        f"Health: {services.get('health_monitor')} | Watchers: {services.get('watchers')} | API: {services.get('core_api')}\n"
+        f"Health: {services.get('health_monitor')} | Watchers: {services.get('watchers')} | API: {services.get('core_api')} | Autonomous: {services.get('autonomous')}\n"
         f"LLM HTTP: {data.get('llm_http')} | Modelo pronto: {'sim' if data.get('llm_ready') else 'nao'}"
     )
 
@@ -210,7 +212,7 @@ def ask(text: str) -> str:
 def main() -> int:
     if len(sys.argv) > 1:
         print(ask(' '.join(sys.argv[1:])), flush=True); return 0
-    print('Hermes Core v3.0 - Personal Agent local-first', flush=True)
+    print('Hermes Core v3.4 - Autonomous Goal Execution', flush=True)
     while True:
         try: text=input('\nVoce > ').strip()
         except (EOFError, KeyboardInterrupt): print(); return 0
