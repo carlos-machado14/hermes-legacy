@@ -30,7 +30,8 @@ def llm(prompt: str, system: str | None = None) -> str:
         'temperature': 0.2,
         'max_tokens': MAX_TOKENS,
     }
-    with httpx.Client(timeout=TIMEOUT) as client:
+    timeout = httpx.Timeout(connect=5.0, read=float(TIMEOUT), write=10.0, pool=5.0)
+    with httpx.Client(timeout=timeout) as client:
         r = client.post(f'{BASE_URL}/chat/completions', json=payload)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
@@ -41,19 +42,27 @@ def system_health() -> dict:
     swap = psutil.swap_memory()
     disk = psutil.disk_usage('/')
     return {
-        'cpu_percent': psutil.cpu_percent(interval=0.4),
+        'cpu_percent': psutil.cpu_percent(interval=0.25),
         'ram_percent': vm.percent,
         'ram_available_mb': round(vm.available / 1024 / 1024),
         'swap_percent': swap.percent,
         'disk_percent': disk.percent,
-        'load': list(os.getloadavg()),
+        'load': [round(v, 2) for v in os.getloadavg()],
         'uptime_hours': round((time.time() - psutil.boot_time()) / 3600, 1),
     }
 
 
 def service_state(name: str) -> str:
-    p = subprocess.run(['systemctl', '--user', 'is-active', name], text=True, capture_output=True, timeout=8)
-    return (p.stdout or p.stderr).strip() or 'unknown'
+    try:
+        p = subprocess.run(
+            ['systemctl', '--user', 'is-active', name],
+            text=True,
+            capture_output=True,
+            timeout=4,
+        )
+        return (p.stdout or p.stderr).strip() or 'unknown'
+    except Exception:
+        return 'unknown'
 
 
 def local_status() -> dict:
@@ -64,7 +73,7 @@ def local_status() -> dict:
         'router': service_state('hermes-fast-router.service'),
     }
     try:
-        with httpx.Client(timeout=5) as client:
+        with httpx.Client(timeout=3) as client:
             r = client.get(f'{BASE_URL}/models')
             data['llm_http'] = r.status_code
             data['llm_ready'] = r.status_code == 200
@@ -73,6 +82,20 @@ def local_status() -> dict:
         data['llm_ready'] = False
         data['llm_error'] = str(e)
     return data
+
+
+def format_health(data: dict) -> str:
+    services = data.get('services', {})
+    service_ok = all(services.get(k) == 'active' for k in ('llm', 'gateway', 'router'))
+    overall = 'OK' if service_ok and data.get('llm_ready') else 'ATENCAO'
+    return (
+        f'Hermes VPS: {overall}\n'
+        f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% "
+        f"({data['ram_available_mb']} MB livres) | Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
+        f"Load: {data['load']} | Uptime: {data['uptime_hours']}h\n"
+        f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')}\n"
+        f"LLM HTTP: {data.get('llm_http')} | Modelo pronto: {'sim' if data.get('llm_ready') else 'nao'}"
+    )
 
 
 def route(text: str) -> str:
@@ -87,16 +110,15 @@ def route(text: str) -> str:
 def ask(text: str) -> str:
     r = route(text)
     if r == 'health':
-        data = local_status()
-        return llm('Resuma em portugues, em poucas linhas, este status real da VPS. Nao invente nada:\n' + json.dumps(data, ensure_ascii=False))
+        return format_health(local_status())
     return llm(text)
 
 
 def main() -> int:
     if len(sys.argv) > 1:
-        print(ask(' '.join(sys.argv[1:])))
+        print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
-    print('Hermes Core v2 - local-first')
+    print('Hermes Core v2 - local-first', flush=True)
     while True:
         try:
             text = input('\nVoce > ').strip()
@@ -107,9 +129,9 @@ def main() -> int:
             return 0
         if text:
             try:
-                print('\nHermes > ' + ask(text))
+                print('\nHermes > ' + ask(text), flush=True)
             except Exception as e:
-                print(f'\nHermes > erro: {e}')
+                print(f'\nHermes > erro: {e}', flush=True)
 
 
 if __name__ == '__main__':
