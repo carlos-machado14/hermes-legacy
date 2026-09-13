@@ -13,6 +13,9 @@ from research_engine import format_results
 from onboarding_parser import process as process_onboarding
 from proactive_engine import daily_brief, weekly_review, recommendation, continue_last, history as decision_history
 from proactive_settings import enable as enable_proactive, disable as disable_proactive, summary as proactive_summary
+from autonomy_settings import enable as enable_autonomy, disable as disable_autonomy, summary as autonomy_summary
+from goal_execution_engine import run_cycle, summary as autonomous_actions_summary, capability_summary, approve_and_execute
+from action_queue import reject as reject_action
 from decision_log import record
 
 
@@ -59,10 +62,52 @@ def _asks_for_profile(low: str) -> bool:
     return 'perfil' in low and any(k in low for k in ('quais', 'dados', 'informa', 'mostre', 'liste', 'salvo', 'tenho'))
 
 
+def _format_cycle(report: dict) -> str:
+    executed = report.get('executed') or []
+    waiting = report.get('waiting_approval') or []
+    if report.get('reason') == 'autonomy_disabled':
+        return 'A execução autônoma está pausada. Diga "ative execução autônoma" para habilitar.'
+    out = ['Ciclo autônomo concluído.']
+    if executed:
+        out.append('Executado por mim:')
+        for a in executed: out.append(f"- [{a.get('id')}] {a.get('title')} | {a.get('status')}")
+    else: out.append('Nenhuma ação de baixo risco precisou ser executada agora.')
+    if waiting:
+        out.append('Aguardando sua aprovação:')
+        for a in waiting[:8]: out.append(f"- [{a.get('id')}] {a.get('title')} | risco={a.get('risk')}")
+        out.append('Use: aprovar ação <ID>')
+    return '\n'.join(out)
+
+
 def handle(text: str) -> str | None:
     onboarding = process_onboarding(text)
     if onboarding is not None: return onboarding
     t = text.strip(); low = t.lower()
+
+    if any(k in low for k in ('ative execução autônoma', 'ativar execução autônoma', 'ative execucao autonoma', 'ativar execucao autonoma', 'quero que execute sozinho')):
+        enable_autonomy(); record('autonomy_mode', 'Execução autônoma ativada.'); return 'Execução autônoma ativada. Ações internas de baixo risco podem ser executadas automaticamente; ações externas continuam exigindo sua aprovação.\n' + autonomy_summary()
+    if any(k in low for k in ('pause execução autônoma', 'pausar execução autônoma', 'desative execução autônoma', 'desativar execução autônoma', 'pause execucao autonoma')):
+        disable_autonomy(); record('autonomy_mode', 'Execução autônoma pausada.'); return 'Execução autônoma pausada. Fila, histórico e resultados foram preservados.'
+    if any(k in low for k in ('status da autonomia', 'status da execução autônoma', 'status da execucao autonoma', 'como está a autonomia', 'como esta a autonomia')):
+        return autonomy_summary()
+    if any(k in low for k in ('o que você pode fazer sozinho', 'o que voce pode fazer sozinho', 'o que consegue executar sozinho', 'limites da autonomia')):
+        return capability_summary()
+    if any(k in low for k in ('execute minhas próximas ações', 'execute minhas proximas acoes', 'rode ciclo autônomo', 'rode ciclo autonomo', 'trabalhe nos meus objetivos agora')):
+        return _format_cycle(run_cycle())
+    if any(k in low for k in ('ações aguardando aprovação', 'acoes aguardando aprovacao', 'fila de ações', 'fila de acoes', 'ações autônomas', 'acoes autonomas')):
+        return autonomous_actions_summary()
+    if low.startswith('aprovar ação ') or low.startswith('aprovar acao '):
+        ref = _after(t, ('aprovar ação', 'aprovar acao'))
+        try:
+            action = approve_and_execute(ref); record('autonomous_action_approved', action.get('title',''), metadata={'action_id':action.get('id')})
+            result = str(action.get('result') or '').strip()
+            return f"Ação [{action.get('id')}] processada: {action.get('status')}\n{result[:1800]}"
+        except KeyError: return 'Ação não encontrada.'
+    if low.startswith('rejeitar ação ') or low.startswith('rejeitar acao '):
+        ref = _after(t, ('rejeitar ação', 'rejeitar acao'))
+        try:
+            action = reject_action(ref); record('autonomous_action_rejected', action.get('title',''), metadata={'action_id':action.get('id')}); return f"Ação rejeitada: [{action.get('id')}] {action.get('title')}"
+        except KeyError: return 'Ação não encontrada.'
 
     if any(k in low for k in ('ative modo proativo', 'ativar modo proativo', 'liga modo proativo', 'ligue modo proativo', 'quero que me avise sozinho', 'seja proativo')):
         enable_proactive(); record('proactive_mode', 'Modo proativo ativado.'); return 'Modo proativo ativado. Vou acompanhar seus objetivos e te avisar nos momentos importantes.\n' + proactive_summary()
