@@ -1,5 +1,5 @@
 name: hermes-core-fastpath
-version: 1.4.0
-description: Processa mensagens autorizadas em fila assíncrona, preserva contexto e evita timeouts prematuros no Telegram.
+version: 1.5.0
+description: Mantem tarefas longas em execucao ate concluir, envia progresso e evita duplicar comandos continue no Telegram.
 provides_hooks:
   - pre_gateway_dispatch
