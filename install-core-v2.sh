@@ -35,7 +35,7 @@ for file in \
   onboarding_parser.py context_builder.py decision_log.py proactive_engine.py \
   proactive_settings.py autonomous_service.py action_queue.py autonomy_settings.py goal_execution_engine.py \
   lead_manager.py crm_engine.py deep_research.py opportunity_hunter.py learning_engine.py business_router.py \
-  conversation_memory.py contextual_router.py core_entry.py memory_vault.py memory_router.py; do
+  conversation_memory.py contextual_router.py core_entry.py memory_vault.py memory_router.py site_sales_workflow.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -156,7 +156,7 @@ systemctl --user restart hermes-core-health.service hermes-core-watchers.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, core_entry, agent_router; print("dependencias Core v3.6 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, site_sales_workflow, core_entry, agent_router; print("dependencias Core v3.6 OK")'
 )
 
 log "Validando API..."; sleep 1; curl -fsS http://127.0.0.1:8090/health >/dev/null
@@ -165,5 +165,6 @@ echo "Memory Vault: $MEMORY_VAULT"
 echo "Indice leve SQLite: $TARGET/state/memory_index.sqlite3"
 echo "Estado pessoal e de negocios preservado em: $TARGET/state"
 echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
+echo "Workflow diario de sites: disponivel para vincular ao objetivo ativo"
 echo "API local: http://127.0.0.1:8090"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
