@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="$HOME/.hermes/core-v2"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 SYSTEMD_USER="$HOME/.config/systemd/user"
+SCRIPTS="$HOME/.hermes/scripts"
 
 log() { printf '[core-v2] %s\n' "$*"; }
 
@@ -39,11 +40,12 @@ ensure_venv_support() {
   fi
 }
 
-mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER"
+mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER" "$SCRIPTS"
 cp "$ROOT/core_v2/hermes_core.py" "$TARGET/hermes_core.py"
 cp "$ROOT/core_v2/tools.py" "$TARGET/tools.py"
 cp "$ROOT/core_v2/planner.py" "$TARGET/planner.py"
 cp "$ROOT/core_v2/health_monitor.py" "$TARGET/health_monitor.py"
+cp "$ROOT/core_v2/local_briefs.py" "$TARGET/local_briefs.py"
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
@@ -75,7 +77,23 @@ log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
 
-chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py"
+
+log "Instalando scripts locais de cron (no-agent)..."
+make_wrapper() {
+  local path="$1"
+  local mode="$2"
+  cat > "$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$TARGET/venv/bin/python" "$TARGET/local_briefs.py" "$mode"
+EOF
+  chmod +x "$path"
+}
+make_wrapper "$SCRIPTS/ai-daily-brief.sh" ai
+make_wrapper "$SCRIPTS/marketing-leads-brief.sh" marketing
+make_wrapper "$SCRIPTS/product-opportunity-brief.sh" product
+make_wrapper "$SCRIPTS/financial-subscriptions-brief.sh" finance
 
 log "Instalando health monitor..."
 cat > "$SYSTEMD_USER/hermes-core-health.service" <<EOF
@@ -100,11 +118,14 @@ systemctl --user enable --now hermes-core-health.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml; import tools, planner; print("dependencias OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser; import tools, planner, local_briefs; print("dependencias OK")'
 )
 
 log "Hermes Core v2 instalado em $TARGET"
 echo "Testes:"
 echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'status da vps'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'verifique por que minhas crons estao falhando'"
+echo "  $SCRIPTS/ai-daily-brief.sh"
+echo "  $SCRIPTS/marketing-leads-brief.sh"
 echo "  systemctl --user status hermes-core-health.service --no-pager"
+echo "Para migrar as crons existentes para no-agent:"
+echo "  cd $ROOT && ./migrate-crons-local.sh"
