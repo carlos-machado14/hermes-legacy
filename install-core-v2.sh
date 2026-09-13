@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 SCRIPTS="$HOME/.hermes/scripts"
 
-log() { printf '[core-v2.2] %s\n' "$*"; }
+log() { printf '[core-v2.3] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -34,11 +34,11 @@ ensure_venv_support() {
 mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER" "$SCRIPTS"
 chmod 700 "$TARGET/state" "$TARGET/logs" 2>/dev/null || true
 
-# Somente codigo da aplicacao e atualizado. Estado/config do usuario nunca vem do repo.
 for file in \
   hermes_core.py tools.py planner.py health_monitor.py local_briefs.py \
   memory_store.py action_executor.py tool_registry.py recovery_engine.py event_bus.py \
-  project_registry.py incident_store.py watcher_engine.py api_server.py; do
+  project_registry.py incident_store.py watcher_engine.py api_server.py \
+  project_ops.py project_commands.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -66,12 +66,8 @@ log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
 chmod +x \
-  "$TARGET/hermes_core.py" \
-  "$TARGET/health_monitor.py" \
-  "$TARGET/local_briefs.py" \
-  "$TARGET/recovery_engine.py" \
-  "$TARGET/watcher_engine.py" \
-  "$TARGET/api_server.py"
+  "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" \
+  "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py"
 
 log "Instalando wrappers genericos opcionais (nenhuma cron sera criada)..."
 make_wrapper() {
@@ -96,7 +92,7 @@ make_wrapper "$SCRIPTS/financial-subscriptions-brief.sh" finance
 log "Instalando health monitor + recovery engine..."
 cat > "$SYSTEMD_USER/hermes-core-health.service" <<EOF
 [Unit]
-Description=Hermes Core v2.2 Autonomous Health + Recovery Monitor
+Description=Hermes Core v2.3 Autonomous Health + Recovery Monitor
 After=network-online.target hermes-local-llm.service hermes-gateway.service
 
 [Service]
@@ -114,7 +110,7 @@ EOF
 log "Instalando watcher engine de projetos..."
 cat > "$SYSTEMD_USER/hermes-core-watchers.service" <<EOF
 [Unit]
-Description=Hermes Core v2.2 Project Watchers + Incident Detection
+Description=Hermes Core v2.3 Project Watchers + Incident Detection
 After=network-online.target hermes-core-health.service
 
 [Service]
@@ -132,7 +128,7 @@ EOF
 log "Instalando API central local..."
 cat > "$SYSTEMD_USER/hermes-core-api.service" <<EOF
 [Unit]
-Description=Hermes Core v2.2 Local API
+Description=Hermes Core v2.3 Local API
 After=network-online.target hermes-core-health.service
 
 [Service]
@@ -157,14 +153,14 @@ systemctl --user restart hermes-core-health.service hermes-core-watchers.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server; print("dependencias Core v2.2 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands; print("dependencias Core v2.3 OK")'
 )
 
 log "Validando API..."
 sleep 1
 curl -fsS http://127.0.0.1:8090/health >/dev/null
 
-log "Hermes Core v2.2 instalado/atualizado em $TARGET"
+log "Hermes Core v2.3 instalado/atualizado em $TARGET"
 echo "Dados preservados em: $TARGET/state"
 echo "Config pessoal preservada em: $TARGET/config.yaml"
 echo "API local: http://127.0.0.1:8090"
