@@ -9,7 +9,7 @@ SCRIPTS="$HOME/.hermes/scripts"
 MEMORY_VAULT="$HOME/.hermes/memory"
 WORKSPACES="$HOME/.hermes/workspaces"
 
-log() { printf '[core-v3.6] %s\n' "$*"; }
+log() { printf '[core-v3.7] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -30,7 +30,7 @@ chmod 700 "$TARGET/state" "$TARGET/logs" "$MEMORY_VAULT" "$WORKSPACES" 2>/dev/nu
 for file in \
   hermes_core.py tools.py planner.py health_monitor.py local_briefs.py \
   memory_store.py action_executor.py tool_registry.py recovery_engine.py event_bus.py \
-  project_registry.py incident_store.py watcher_engine.py api_server.py \
+  project_registry.py incident_store.py watcher_engine.py api_server.py openai_bridge.py \
   project_ops.py project_commands.py goal_manager.py task_manager.py personal_memory.py \
   skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py \
   onboarding_parser.py context_builder.py decision_log.py proactive_engine.py \
@@ -63,7 +63,7 @@ if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then log "pip a
 log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
-chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/openai_bridge.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
 
 log "Inicializando Memory Vault leve..."
 (
@@ -127,7 +127,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-api.service" <<EOF
 [Unit]
-Description=Hermes Core v3.6 Local API
+Description=Hermes Core v3.7 Local API
 After=network-online.target hermes-core-health.service
 [Service]
 Type=simple
@@ -143,9 +143,27 @@ EnvironmentFile=-%h/.config/hermes/core-api.env
 WantedBy=default.target
 EOF
 
+cat > "$SYSTEMD_USER/hermes-openai-bridge.service" <<EOF
+[Unit]
+Description=Hermes Unified OpenAI Bridge for App/Voice
+After=network-online.target hermes-core-api.service hermes-local-llm.service
+[Service]
+Type=simple
+ExecStart=$TARGET/venv/bin/python $TARGET/openai_bridge.py
+Restart=always
+RestartSec=5
+WorkingDirectory=$TARGET
+Environment=PYTHONUNBUFFERED=1
+Environment=HERMES_OPENAI_BRIDGE_HOST=127.0.0.1
+Environment=HERMES_OPENAI_BRIDGE_PORT=8091
+EnvironmentFile=-%h/.config/hermes/core-api.env
+[Install]
+WantedBy=default.target
+EOF
+
 cat > "$SYSTEMD_USER/hermes-core-autonomous.service" <<EOF
 [Unit]
-Description=Hermes Core v3.6 Autonomous Personal + Business Agent
+Description=Hermes Core v3.7 Autonomous Personal + Business Agent
 After=network-online.target hermes-gateway.service hermes-core-api.service
 [Service]
 Type=simple
@@ -159,23 +177,26 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-core-autonomous.service
-systemctl --user restart hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-core-autonomous.service
+systemctl --user enable --now hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-openai-bridge.service hermes-core-autonomous.service
+systemctl --user restart hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-openai-bridge.service hermes-core-autonomous.service
 
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, site_sales_workflow, github_workspace, developer_router, core_entry, agent_router; print("dependencias Core v3.6 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, openai_bridge, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, site_sales_workflow, github_workspace, developer_router, core_entry, agent_router; print("dependencias Core v3.7 OK")'
 )
 
-log "Validando API..."; sleep 1; curl -fsS http://127.0.0.1:8090/health >/dev/null
-log "Hermes Core v3.6 instalado/atualizado em $TARGET"
+log "Validando APIs..."; sleep 1
+curl -fsS http://127.0.0.1:8090/health >/dev/null
+curl -fsS http://127.0.0.1:8091/health >/dev/null
+log "Hermes Core v3.7 instalado/atualizado em $TARGET"
 echo "Memory Vault: $MEMORY_VAULT"
 echo "Workspaces GitHub: $WORKSPACES"
 echo "Indice leve SQLite: $TARGET/state/memory_index.sqlite3"
 echo "Estado pessoal e de negocios preservado em: $TARGET/state"
 echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
-echo "Workflow diario de sites: disponivel para vincular ao objetivo ativo"
+echo "Workflow diario de sites: ativo quando vinculado ao objetivo"
 echo "GitHub Workspace: leitura/clonagem/branch/commit local + ações remotas com aprovação"
-echo "API local: http://127.0.0.1:8090"
+echo "API local Core: http://127.0.0.1:8090"
+echo "Bridge OpenAI/app/voz: http://127.0.0.1:8091"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
