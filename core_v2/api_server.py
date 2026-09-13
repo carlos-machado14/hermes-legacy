@@ -12,6 +12,7 @@ from event_bus import recent as recent_events
 from incident_store import recent_incidents
 from memory_store import recent as recent_memory
 from project_registry import list_projects, upsert_project, remove_project
+from project_ops import project_status, restart_project
 
 ROOT = Path.home() / ".hermes/core-v2"
 HOST = os.getenv("HERMES_CORE_API_HOST", "127.0.0.1")
@@ -52,7 +53,7 @@ def _run_core(message: str) -> tuple[int, str]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "HermesCoreAPI/2.2"
+    server_version = "HermesCoreAPI/2.3"
 
     def log_message(self, fmt: str, *args) -> None:
         return
@@ -68,7 +69,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/health":
-            _json(self, 200, {"ok": True, "version": "2.2", "api": "active"})
+            _json(self, 200, {"ok": True, "version": "2.3", "api": "active"})
         elif path == "/events":
             _json(self, 200, {"ok": True, "events": recent_events(100)})
         elif path == "/memory":
@@ -109,13 +110,21 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/projects/remove":
             name = str(body.get("name") or "").strip()
             _json(self, 200, {"ok": True, "removed": remove_project(name) if name else False})
+        elif path == "/projects/status":
+            name = str(body.get("name") or "").strip()
+            report = project_status(name) if name else {"ok": False, "error": "name_required"}
+            _json(self, 200 if report.get("ok") else 404 if report.get("error") == "project_not_found" else 400, report)
+        elif path == "/projects/restart":
+            name = str(body.get("name") or "").strip()
+            report = restart_project(name) if name else {"ok": False, "error": "name_required"}
+            _json(self, 200 if report.get("ok") else 409, report)
         else:
             _json(self, 404, {"ok": False, "error": "not_found"})
 
 
 def main() -> int:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Hermes Core API 2.2 listening on http://{HOST}:{PORT}", flush=True)
+    print(f"Hermes Core API 2.3 listening on http://{HOST}:{PORT}", flush=True)
     server.serve_forever()
     return 0
 
