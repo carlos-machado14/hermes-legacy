@@ -5,8 +5,10 @@ import base64
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,10 @@ CRON_RE = re.compile(
     r"\b(?:quais rotinas|minhas rotinas|listar rotinas|liste as rotinas|listar crons)\b)",
     re.IGNORECASE,
 )
+
+_JOB_QUEUE: queue.Queue[tuple[Any, Any, str, bool]] = queue.Queue(maxsize=100)
+_WORKER_STARTED = False
+_WORKER_LOCK = threading.Lock()
 
 
 def _env_value(name: str) -> str:
@@ -133,10 +139,13 @@ def _run_core(text: str) -> str:
     py = root / 'venv' / 'bin' / 'python'
     core = root / 'core_entry.py'
     logger.info("fastpath -> conversational core text=%r", text[:180])
-    proc = subprocess.run([str(py), str(core), text], text=True, capture_output=True, timeout=55, cwd=str(root))
+    proc = subprocess.run(
+        [str(py), str(core), text], text=True, capture_output=True,
+        timeout=150, cwd=str(root),
+    )
     logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
     if proc.returncode != 0:
-        return f"⚠️ Hermes Core retornou erro: {(proc.stderr or proc.stdout)[-800:].strip()}"
+        return f"⚠️ Não consegui concluir essa resposta. Detalhe: {(proc.stderr or proc.stdout)[-500:].strip()}"
     return (proc.stdout or '').strip() or 'Hermes Core concluiu a ação sem mensagem.'
 
 
@@ -146,11 +155,11 @@ def _run_cron(text: str) -> str:
     manager = root / 'cron_manager.py'
     encoded = base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
     logger.info("fastpath -> cron text=%r", text[:180])
-    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=30, cwd=str(root))
+    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=90, cwd=str(root))
     raw = (proc.stdout or '').strip()
     logger.info("fastpath cron rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(raw), len(proc.stderr or ''))
     if proc.returncode != 0:
-        return f"⚠️ Cron Manager retornou erro: {(proc.stderr or raw)[-800:].strip()}"
+        return f"⚠️ Não consegui concluir essa rotina agora. Detalhe: {(proc.stderr or raw)[-500:].strip()}"
     marker = 'HERMES_CRON_RESULT:'
     if marker in raw:
         return raw.rsplit(marker, 1)[-1].strip()
@@ -212,6 +221,50 @@ def _schedule_send(gateway: Any, source: Any, text: str) -> None:
         logger.exception("fastpath send failed: %s", exc)
 
 
+def _slow_notice(gateway: Any, source: Any, done: threading.Event) -> None:
+    if done.wait(8):
+        return
+    _schedule_send(gateway, source, 'Estou analisando isso. Se levar um pouco mais, vou concluir aqui sem perder o contexto.')
+
+
+def _process_job(gateway: Any, source: Any, text: str, is_cron: bool) -> None:
+    done = threading.Event()
+    notice = threading.Thread(target=_slow_notice, args=(gateway, source, done), daemon=True)
+    notice.start()
+    try:
+        reply = _run_cron(text) if is_cron else _run_core(text)
+    except subprocess.TimeoutExpired:
+        logger.exception("fastpath local execution reached hard safety limit")
+        reply = 'Não consegui concluir essa análise automaticamente. O contexto foi preservado; posso retomar a partir daqui.'
+    except Exception as exc:
+        logger.exception("fastpath local execution failed: %s", exc)
+        reply = f'Não consegui concluir essa resposta agora. O contexto foi preservado. Detalhe: {exc}'
+    finally:
+        done.set()
+    _schedule_send(gateway, source, reply)
+
+
+def _worker() -> None:
+    logger.warning("HERMES CORE FASTPATH background worker started")
+    while True:
+        gateway, source, text, is_cron = _JOB_QUEUE.get()
+        try:
+            _process_job(gateway, source, text, is_cron)
+        except Exception:
+            logger.exception("fastpath background job crashed")
+        finally:
+            _JOB_QUEUE.task_done()
+
+
+def _ensure_worker() -> None:
+    global _WORKER_STARTED
+    with _WORKER_LOCK:
+        if _WORKER_STARTED:
+            return
+        threading.Thread(target=_worker, name='hermes-core-fastpath-worker', daemon=True).start()
+        _WORKER_STARTED = True
+
+
 def pre_gateway_dispatch(**kwargs):
     event = kwargs.get('event')
     gateway = kwargs.get('gateway')
@@ -234,20 +287,18 @@ def pre_gateway_dispatch(**kwargs):
         logger.info("fastpath allow slash command=%r", text[:80])
         return None
 
+    _ensure_worker()
     try:
-        reply = _run_cron(text) if CRON_RE.search(text) else _run_core(text)
-    except subprocess.TimeoutExpired:
-        logger.exception("fastpath local execution timeout")
-        reply = '⚠️ O Hermes Core excedeu o tempo limite. Tente novamente em alguns segundos.'
-    except Exception as exc:
-        logger.exception("fastpath local execution failed: %s", exc)
-        reply = f'⚠️ Falha no Hermes Core: {exc}'
+        _JOB_QUEUE.put_nowait((gateway, source, text, bool(CRON_RE.search(text))))
+        logger.info("fastpath queued chat=%s queue_size=%s", getattr(source, 'chat_id', None), _JOB_QUEUE.qsize())
+    except queue.Full:
+        _schedule_send(gateway, source, 'Estou com muitas tarefas em andamento. Sua mensagem não foi perdida; tente novamente em alguns instantes.')
 
-    _schedule_send(gateway, source, reply)
-    logger.info("fastpath SKIP legacy dispatch reason=hermes-core-all-messages")
-    return {'action': 'skip', 'reason': 'hermes-core-all-messages'}
+    logger.info("fastpath SKIP legacy dispatch reason=hermes-core-background-queue")
+    return {'action': 'skip', 'reason': 'hermes-core-background-queue'}
 
 
 def register(ctx):
-    logger.warning("HERMES CORE FASTPATH v1.3.0 REGISTERED")
+    _ensure_worker()
+    logger.warning("HERMES CORE FASTPATH v1.4.0 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
