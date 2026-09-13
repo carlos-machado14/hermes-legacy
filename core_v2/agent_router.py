@@ -12,6 +12,7 @@ from skill_registry import describe as skills_summary
 from research_engine import format_results
 from onboarding_parser import process as process_onboarding
 from proactive_engine import daily_brief, weekly_review, recommendation, continue_last, history as decision_history
+from proactive_settings import enable as enable_proactive, disable as disable_proactive, summary as proactive_summary
 from decision_log import record
 
 
@@ -63,10 +64,17 @@ def handle(text: str) -> str | None:
     if onboarding is not None: return onboarding
     t = text.strip(); low = t.lower()
 
+    if any(k in low for k in ('ative modo proativo', 'ativar modo proativo', 'liga modo proativo', 'ligue modo proativo', 'quero que me avise sozinho', 'seja proativo')):
+        enable_proactive(); record('proactive_mode', 'Modo proativo ativado.'); return 'Modo proativo ativado. Vou acompanhar seus objetivos e te avisar nos momentos importantes.\n' + proactive_summary()
+    if any(k in low for k in ('pause modo proativo', 'pausar modo proativo', 'desative modo proativo', 'desativar modo proativo', 'pare de me avisar sozinho')):
+        disable_proactive(); record('proactive_mode', 'Modo proativo pausado.'); return 'Modo proativo pausado. Suas configurações e histórico foram preservados.'
+    if any(k in low for k in ('status do modo proativo', 'como está o modo proativo', 'como esta o modo proativo', 'configuração proativa', 'configuracao proativa')):
+        return proactive_summary()
+
     if low in {'skills', 'habilidades do hermes', 'o que voce sabe fazer', 'o que você sabe fazer'} or 'quais skills' in low: return skills_summary()
     if any(k in low for k in ('meus objetivos', 'listar objetivos', 'quais objetivos')): return goals_summary()
     if any(low.startswith(k) for k in ('crie objetivo ', 'criar objetivo ', 'novo objetivo ')):
-        title = _after(t, ('crie objetivo', 'criar objetivo', 'novo objetivo')); g = create_goal(title); return f"Objetivo criado: [{g['id']}] {g['title']}"
+        title = _after(t, ('crie objetivo', 'criar objetivo', 'novo objetivo')); g = create_goal(title); record('goal_created', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo criado: [{g['id']}] {g['title']}"
     if any(k in low for k in ('quero ganhar ', 'meta de renda', 'meta de receita', 'quero faturar ')):
         inferred = infer_money_goal(t)
         if inferred:
