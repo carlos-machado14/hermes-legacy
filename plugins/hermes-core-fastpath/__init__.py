@@ -131,9 +131,9 @@ def _remember_channel(source: Any) -> None:
 def _run_core(text: str) -> str:
     root = Path.home() / '.hermes' / 'core-v2'
     py = root / 'venv' / 'bin' / 'python'
-    core = root / 'hermes_core.py'
-    logger.info("fastpath -> core text=%r", text[:180])
-    proc = subprocess.run([str(py), str(core), text], text=True, capture_output=True, timeout=40, cwd=str(root))
+    core = root / 'core_entry.py'
+    logger.info("fastpath -> conversational core text=%r", text[:180])
+    proc = subprocess.run([str(py), str(core), text], text=True, capture_output=True, timeout=55, cwd=str(root))
     logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
     if proc.returncode != 0:
         return f"⚠️ Hermes Core retornou erro: {(proc.stderr or proc.stdout)[-800:].strip()}"
@@ -249,5 +249,5 @@ def pre_gateway_dispatch(**kwargs):
 
 
 def register(ctx):
-    logger.warning("HERMES CORE FASTPATH v1.2.1 REGISTERED")
+    logger.warning("HERMES CORE FASTPATH v1.3.0 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
