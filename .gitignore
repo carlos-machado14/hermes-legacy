@@ -1,9 +1,50 @@
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+auth.json
+*.key
+*.pem
+*.p12
+*.pfx
+
+# User-specific runtime configuration
+config.yaml
+config.local.yaml
+*.local.yaml
+user-config/
+local/
+
+# Runtime state (never version user data)
+state/
+data/
+jobs.json
+managed_crons.json
+subscriptions.json
+memory.json
+memory.jsonl
+events.jsonl
+*.sqlite
+*.sqlite3
+*.db
+
+# Runtime/generated files
+backups/
+logs/
 *.log
 *.bak
-.env
-config.yaml
-auth.json
-jobs.json
-backups/
+*.pid
 __pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local models / large assets
+models/
+*.gguf
+*.safetensors
+
+# OS/editor
 .DS_Store
+.idea/
+.vscode/
