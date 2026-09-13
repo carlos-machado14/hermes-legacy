@@ -12,8 +12,10 @@ CORE_RE = re.compile(
     r"\b(?:verifique|verificar)\b.*\b(?:vps|servi[cç]os?|crons?)\b|"
     r"\b(?:corrija tudo|corrigir tudo|recupere os servi[cç]os|auto[- ]?recovery)\b|"
     r"\b(?:o que (?:voc[eê] )?corrigiu|hist[oó]rico (?:operacional|de corre[cç][oõ]es))\b|"
-    r"\b(?:reinicie|reiniciar)\b.*\b(?:gateway|router|llm|modelo|health|monitor)\b|"
+    r"\b(?:reinicie|reiniciar)\b.*\b(?:gateway|router|llm|modelo|health|monitor|watchers?|api)\b|"
     r"\b(?:quais ferramentas|listar ferramentas|ferramentas)\b|"
+    r"\b(?:quais projetos|listar projetos|liste os projetos|meus projetos)\b|"
+    r"\b(?:incidentes|incidentes recentes|problemas recentes|falhas recentes)\b|"
     r"\b(?:containers|docker ps|status do docker)\b|"
     r"\b(?:logs? do (?:gateway|llm|modelo|router))\b)",
     re.IGNORECASE,
