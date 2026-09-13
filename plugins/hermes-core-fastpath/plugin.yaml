@@ -1,5 +1,5 @@
 name: hermes-core-fastpath
-version: 1.2.1
-description: Intercepta mensagens autorizadas, encaminha ao Hermes Core, registra o canal e divide respostas longas em partes seguras para o Telegram.
+version: 1.3.0
+description: Intercepta mensagens autorizadas, usa contexto conversacional do Hermes Core e divide respostas longas para Telegram.
 provides_hooks:
   - pre_gateway_dispatch
