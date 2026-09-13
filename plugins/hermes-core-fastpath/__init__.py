@@ -24,6 +24,7 @@ CORE_RE = re.compile(
     r"\b(?:minhas tarefas|listar tarefas|tarefas pendentes|crie tarefa|criar tarefa|nova tarefa|concluir tarefa|marque tarefa)\b|"
     r"\b(?:quero ganhar|quero faturar|meta de renda|meta de receita|oportunidades(?: para ganhar dinheiro| de renda| de neg[oó]cio)?|minhas oportunidades)\b|"
     r"\b(?:lembre que eu sei|eu sei|lembre que|meu perfil|perfil pessoal|o que voc[eê] sabe sobre mim)\b|"
+    r"\b(?:salve este contexto|perfil principal|meu objetivo atual|meus principais interesses|como primeiro experimento|a partir de agora)\b|"
     r"\b(?:pesquise|pesquisar)\b)",
     re.IGNORECASE,
 )
