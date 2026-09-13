@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 SYSTEMD_USER="$HOME/.config/systemd/user"
 SCRIPTS="$HOME/.hermes/scripts"
 
-log() { printf '[core-v3.2] %s\n' "$*"; }
+log() { printf '[core-v3.3] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -30,7 +30,8 @@ for file in \
   project_registry.py incident_store.py watcher_engine.py api_server.py \
   project_ops.py project_commands.py goal_manager.py task_manager.py personal_memory.py \
   skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py \
-  onboarding_parser.py context_builder.py decision_log.py proactive_engine.py; do
+  onboarding_parser.py context_builder.py decision_log.py proactive_engine.py \
+  proactive_settings.py autonomous_service.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -48,7 +49,7 @@ if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then log "pip a
 log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
-chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
 
 log "Instalando wrappers genericos opcionais (nenhuma cron sera criada)..."
 make_wrapper() {
@@ -99,7 +100,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-api.service" <<EOF
 [Unit]
-Description=Hermes Core v3.2 Local API
+Description=Hermes Core v3.3 Local API
 After=network-online.target hermes-core-health.service
 [Service]
 Type=simple
@@ -115,20 +116,36 @@ EnvironmentFile=-%h/.config/hermes/core-api.env
 WantedBy=default.target
 EOF
 
+cat > "$SYSTEMD_USER/hermes-core-autonomous.service" <<EOF
+[Unit]
+Description=Hermes Core v3.3 Autonomous Personal Agent
+After=network-online.target hermes-gateway.service hermes-core-api.service
+[Service]
+Type=simple
+ExecStart=$TARGET/venv/bin/python $TARGET/autonomous_service.py
+Restart=always
+RestartSec=10
+WorkingDirectory=$TARGET
+Environment=PYTHONUNBUFFERED=1
+[Install]
+WantedBy=default.target
+EOF
+
 systemctl --user daemon-reload
-systemctl --user enable --now hermes-core-health.service hermes-core-watchers.service hermes-core-api.service
-systemctl --user restart hermes-core-health.service hermes-core-watchers.service hermes-core-api.service
+systemctl --user enable --now hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-core-autonomous.service
+systemctl --user restart hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-core-autonomous.service
 
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, agent_router; print("dependencias Core v3.2 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, agent_router; print("dependencias Core v3.3 OK")'
 )
 
 log "Validando API..."; sleep 1; curl -fsS http://127.0.0.1:8090/health >/dev/null
-log "Hermes Core v3.2 instalado/atualizado em $TARGET"
+log "Hermes Core v3.3 instalado/atualizado em $TARGET"
 echo "Estado pessoal preservado em: $TARGET/state"
 echo "Config pessoal preservada em: $TARGET/config.yaml"
-echo "Context Builder + Decision Log + Proactive Engine: habilitados"
+echo "Context Builder + Decision Log + Proactive Engine + Autonomous Service: instalados"
+echo "Modo proativo inicia PAUSADO ate voce ativar pelo Telegram."
 echo "API local: http://127.0.0.1:8090"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
