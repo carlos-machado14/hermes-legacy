@@ -30,19 +30,18 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         f"MEMÓRIA RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
         f"MENSAGEM ATUAL\n{prompt}\n\n"
         "Responda considerando referências como isso, ele, essa ideia, aquele plano e esse objetivo. "
-        "Continue o assunto sem pedir novamente dados já disponíveis. Seja direto e útil."
+        "Continue o assunto sem pedir novamente dados já disponíveis. Seja direto e útil. "
+        "Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio."
     )
     low = prompt.lower()
     requested = max_tokens
     if requested is None:
-        requested = 480 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 240
+        requested = 520 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 320
     try:
         return _original_llm(enriched, system=system, max_tokens=requested)
     except Exception as exc:
         if not _is_timeout_error(exc):
             raise
-        # O canal não deve despejar erro técnico para o usuário. Preservamos a
-        # mensagem e devolvemos uma resposta curta, útil e recuperável.
         return (
             'Demorei mais do que deveria para gerar essa resposta. Mantive o contexto e sua mensagem registrada. '
             'Vou priorizar uma resposta mais curta/objetiva na próxima interação em vez de perder a conversa.'
