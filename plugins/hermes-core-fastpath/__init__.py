@@ -21,8 +21,9 @@ CORE_RE = re.compile(
     r"\b(?:containers|docker ps|status do docker)\b|"
     r"\b(?:logs? do (?:gateway|llm|modelo|router))\b|"
     r"\b(?:meus objetivos|listar objetivos|quais objetivos|crie objetivo|criar objetivo|novo objetivo|plano do objetivo|planeje objetivo|concluir objetivo|finalizar objetivo)\b|"
-    r"\b(?:minhas tarefas|listar tarefas|tarefas pendentes|crie tarefa|criar tarefa|nova tarefa|concluir tarefa|marque tarefa)\b|"
-    r"\b(?:quero ganhar|quero faturar|meta de renda|meta de receita|oportunidades(?: para ganhar dinheiro| de renda| de neg[oó]cio)?|minhas oportunidades)\b|"
+    r"\b(?:minhas tarefas|listar tarefas|tarefas pendentes|crie tarefa|criar tarefa|nova tarefa|concluir tarefa|marque tarefa|o que fazemos hoje|o que fa[cç]o hoje|qual (?:[ée] )?a prioridade|o que devo fazer hoje)\b|"
+    r"\b(?:quero ganhar|quero faturar|meta de renda|meta de receita|oportunidades?|oportunidade de ganhar dinheiro|oportunidades para ganhar dinheiro|oportunidades? de renda|oportunidades? de neg[oó]cio|minhas oportunidades|como posso ganhar dinheiro|como ganhar dinheiro|formas de ganhar dinheiro)\b|"
+    r"\b(?:com base (?:nas? )?minhas informa[cç][oõ]es|com base no meu perfil|usando meu perfil)\b|"
     r"\b(?:lembre que eu sei|eu sei|lembre que|meu perfil|perfil pessoal|o que voc[eê] sabe sobre mim)\b|"
     r"\b(?:salve este contexto|perfil principal|meu objetivo atual|meus principais interesses|como primeiro experimento|a partir de agora)\b|"
     r"\b(?:pesquise|pesquisar)\b)",
