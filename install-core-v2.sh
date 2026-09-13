@@ -38,7 +38,16 @@ done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
-if [ ! -f "$TARGET/config.yaml" ]; then cp "$TARGET/config.example.yaml" "$TARGET/config.yaml"; chmod 600 "$TARGET/config.yaml" 2>/dev/null || true; fi
+if [ ! -f "$TARGET/config.yaml" ]; then
+  cp "$TARGET/config.example.yaml" "$TARGET/config.yaml"
+  chmod 600 "$TARGET/config.yaml" 2>/dev/null || true
+else
+  # Migrate only the historical default. Any custom value chosen by the user is preserved.
+  if grep -Eq '^[[:space:]]*max_tokens:[[:space:]]*320[[:space:]]*$' "$TARGET/config.yaml"; then
+    sed -i -E 's/^([[:space:]]*max_tokens:[[:space:]]*)320[[:space:]]*$/\1900/' "$TARGET/config.yaml"
+    log "Limite legado de resposta atualizado: 320 -> 900 tokens"
+  fi
+fi
 
 ensure_venv_support
 if [ -d "$TARGET/venv" ]; then
