@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from action_queue import add_action
+from action_queue import add_action, approve, get_action, update_action
 from decision_log import record
 from github_workspace import (
     auth_status,
@@ -15,6 +15,7 @@ from github_workspace import (
     git_diff,
     create_local_branch,
     local_commit,
+    execute_github_action,
 )
 
 
@@ -40,6 +41,23 @@ def _fmt_repos(rows: list[dict]) -> str:
 def handle(text: str) -> str | None:
     t = text.strip()
     low = t.lower()
+
+    if low.startswith('aprovar ação ') or low.startswith('aprovar acao '):
+        ref = _after(t, ('aprovar ação', 'aprovar acao'))
+        action = get_action(ref)
+        if action and str(action.get('kind') or '').startswith('github_'):
+            try:
+                approved = approve(ref)
+                update_action(approved['id'], status='running')
+                result = execute_github_action(approved)
+                update_action(approved['id'], status='done', result=result)
+                record('github_action_completed', approved.get('title',''), metadata={'action_id': approved['id'], 'kind': approved.get('kind')})
+                return f"Ação GitHub concluída: [{approved['id']}]\n{result}"
+            except Exception as exc:
+                if action:
+                    try: update_action(action['id'], status='failed', error=str(exc))
+                    except Exception: pass
+                return f'Falha ao executar a ação GitHub aprovada: {exc}'
 
     if low in {'github', 'status github', 'status do github', 'github status', 'conexão github', 'conexao github'}:
         st = auth_status()
