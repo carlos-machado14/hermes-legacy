@@ -32,6 +32,9 @@ ensure_venv_support() {
 }
 
 mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER" "$SCRIPTS"
+chmod 700 "$TARGET/state" "$TARGET/logs" 2>/dev/null || true
+
+# Only application code is replaced. Never copy runtime state from the repo.
 for file in \
   hermes_core.py tools.py planner.py health_monitor.py local_briefs.py \
   memory_store.py action_executor.py tool_registry.py recovery_engine.py event_bus.py; do
@@ -40,8 +43,10 @@ done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
+# User config is created once and never overwritten on updates.
 if [ ! -f "$TARGET/config.yaml" ]; then
   cp "$TARGET/config.example.yaml" "$TARGET/config.yaml"
+  chmod 600 "$TARGET/config.yaml" 2>/dev/null || true
 fi
 
 ensure_venv_support
@@ -62,11 +67,18 @@ log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
 chmod +x "$TARGET/hermes_core.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py"
 
-log "Instalando scripts locais de cron (no-agent)..."
+# These are generic built-in capabilities only. They do not create cron jobs.
+log "Instalando wrappers genericos opcionais (nenhuma cron sera criada)..."
 make_wrapper() {
   local path="$1" mode="$2"
+  # Do not replace a user-owned script with the same name.
+  if [ -e "$path" ] && ! grep -q 'HERMES_MANAGED_WRAPPER=1' "$path" 2>/dev/null; then
+    log "Preservando script do usuario: $path"
+    return 0
+  fi
   cat > "$path" <<EOF
 #!/usr/bin/env bash
+# HERMES_MANAGED_WRAPPER=1
 set -euo pipefail
 exec "$TARGET/venv/bin/python" "$TARGET/local_briefs.py" "$mode"
 EOF
@@ -80,7 +92,7 @@ make_wrapper "$SCRIPTS/financial-subscriptions-brief.sh" finance
 log "Instalando health monitor + recovery engine..."
 cat > "$SYSTEMD_USER/hermes-core-health.service" <<EOF
 [Unit]
-Description=Hermes Core v2.1 Autonomous Health + Recovery Monitor
+Description=Hermes Core Autonomous Health + Recovery Monitor
 After=network-online.target hermes-local-llm.service hermes-gateway.service
 
 [Service]
@@ -102,15 +114,10 @@ systemctl --user restart hermes-core-health.service
 log "Validando imports..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus; print("dependencias Core v2.1 OK")'
+  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus; print("dependencias Core OK")'
 )
 
-log "Hermes Core v2.1 instalado em $TARGET"
-echo "Testes rapidos:"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'status da vps'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'ferramentas'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'corrija tudo'"
-echo "  $TARGET/venv/bin/python $TARGET/hermes_core.py 'o que voce corrigiu?'"
-echo "  systemctl --user status hermes-core-health.service --no-pager"
-echo "Para migrar as crons existentes para no-agent:"
-echo "  cd $ROOT && ./migrate-crons-local.sh"
+log "Hermes Core instalado/atualizado em $TARGET"
+echo "Dados preservados em: $TARGET/state"
+echo "Config pessoal preservada em: $TARGET/config.yaml"
+echo "Nenhuma cron foi criada ou migrada."
