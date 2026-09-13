@@ -16,6 +16,9 @@ from task_manager import list_tasks, create_task, complete_task
 from opportunity_engine import list_items as list_opportunities, add as add_opportunity
 from personal_memory import profile as personal_profile
 from skill_registry import list_skills
+from context_builder import snapshot as context_snapshot
+from decision_log import recent as recent_decisions
+from proactive_engine import daily_brief, weekly_review
 
 ROOT = Path.home() / '.hermes/core-v2'
 HOST = os.getenv('HERMES_CORE_API_HOST', '127.0.0.1')
@@ -45,7 +48,7 @@ def _run_core(message: str) -> tuple[int,str]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'HermesCoreAPI/3.0'
+    server_version = 'HermesCoreAPI/3.2'
     def log_message(self, fmt: str, *args) -> None: return
     def _guard(self) -> bool:
         if not _auth_ok(self): _json(self,401,{'ok':False,'error':'unauthorized'}); return False
@@ -54,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._guard(): return
         path = urlparse(self.path).path
-        if path == '/health': _json(self,200,{'ok':True,'version':'3.0','api':'active','mode':'personal-agent'})
+        if path == '/health': _json(self,200,{'ok':True,'version':'3.2','api':'active','mode':'personal-operating-system'})
         elif path == '/events': _json(self,200,{'ok':True,'events':recent_events(100)})
         elif path == '/memory': _json(self,200,{'ok':True,'memory':recent_memory(100)})
         elif path == '/incidents': _json(self,200,{'ok':True,'incidents':recent_incidents(100)})
@@ -64,6 +67,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/opportunities': _json(self,200,{'ok':True,'opportunities':list_opportunities(None)})
         elif path == '/profile': _json(self,200,{'ok':True,'profile':personal_profile()})
         elif path == '/skills': _json(self,200,{'ok':True,'skills':list_skills()})
+        elif path == '/context': _json(self,200,{'ok':True,'context':context_snapshot()})
+        elif path == '/decisions': _json(self,200,{'ok':True,'decisions':recent_decisions(100)})
+        elif path == '/brief/today': _json(self,200,{'ok':True,'brief':daily_brief()})
+        elif path == '/brief/week': _json(self,200,{'ok':True,'brief':weekly_review()})
         else: _json(self,404,{'ok':False,'error':'not_found'})
 
     def do_POST(self) -> None:
@@ -104,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f'Hermes Core API 3.0 listening on http://{HOST}:{PORT}', flush=True); server.serve_forever(); return 0
+    print(f'Hermes Core API 3.2 listening on http://{HOST}:{PORT}', flush=True); server.serve_forever(); return 0
 
 
 if __name__ == '__main__': raise SystemExit(main())
