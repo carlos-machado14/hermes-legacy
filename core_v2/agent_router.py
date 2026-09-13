@@ -89,7 +89,7 @@ def _format_cycle(report: dict) -> str:
     if waiting:
         out.append('Aguardando sua aprovação:')
         for a in waiting[:8]: out.append(f"- [{a.get('id')}] {a.get('title')} | risco={a.get('risk')}")
-        out.append('Use: aprovar ação <ID>')
+        out.append('Use: aprovar ação <ID> ou aprovar ações para aprovar tudo que está pendente.')
     return '\n'.join(out)
 
 
@@ -97,11 +97,42 @@ def _approval_help() -> str:
     rows = list_actions('pending_approval', 20)
     if not rows:
         return 'Não há nenhuma ação aguardando aprovação agora.'
-    out = ['Existem várias ações aguardando aprovação. Para segurança, preciso saber qual delas você quer aprovar:']
+    out = ['Ações aguardando aprovação:']
     for a in rows[:10]:
         out.append(f"- [{a.get('id')}] {a.get('title')}")
-    out.append('Envie: aprovar ação <ID>')
-    out.append('Para liberar apenas ações internas que não têm efeito externo, envie: liberar ações internas')
+    out.append('Para uma só: aprovar ação <ID>')
+    out.append('Para todas de uma vez: aprovar ações')
+    out.append('Para liberar apenas ações internas sem efeito externo: liberar ações internas')
+    return '\n'.join(out)
+
+
+def _approve_all_pending() -> str:
+    rows = list_actions('pending_approval', 100)
+    if not rows:
+        return 'Não há nenhuma ação aguardando aprovação agora.'
+    processed = []
+    failed = []
+    for item in rows:
+        ref = str(item.get('id') or '').strip()
+        if not ref:
+            continue
+        try:
+            action = approve_and_execute(ref)
+            processed.append(action)
+            record('autonomous_action_approved', action.get('title',''), metadata={'action_id': action.get('id'), 'batch': True})
+        except Exception as exc:
+            failed.append((item, str(exc)))
+    out = [f'Aprovei {len(processed)} ação(ões) pendente(s) em lote.']
+    if processed:
+        done = sum(1 for a in processed if a.get('status') == 'done')
+        blocked = sum(1 for a in processed if a.get('status') in {'blocked', 'pending_approval'})
+        running = sum(1 for a in processed if a.get('status') in {'approved', 'running', 'queued'})
+        out.append(f'Concluídas agora: {done} | em processamento/fila: {running} | bloqueadas: {blocked}.')
+        for a in processed[:10]:
+            out.append(f"- [{a.get('id')}] {a.get('title')} → {a.get('status')}")
+    if failed:
+        out.append(f'{len(failed)} ação(ões) não puderam ser processadas; permaneceram para revisão.')
+    out.append('Esse comando é uma aprovação explícita em lote das ações que estavam pendentes naquele momento.')
     return '\n'.join(out)
 
 
@@ -122,6 +153,9 @@ def handle(text: str) -> str | None:
         return _format_cycle(run_cycle())
     if any(k in low for k in ('ações aguardando aprovação', 'acoes aguardando aprovacao', 'fila de ações', 'fila de acoes', 'ações autônomas', 'acoes autonomas')):
         return autonomous_actions_summary()
+
+    if low in {'aprovar ações', 'aprovar acoes', 'aprove ações', 'aprove acoes', 'aprovar tudo', 'aprovar todas', 'aprovar todas as ações', 'aprovar todas as acoes'}:
+        return _approve_all_pending()
 
     if low in {'aprovar ação', 'aprovar acao', 'aprovar'}:
         return _approval_help()
