@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import Any
 
 CORE_RE = re.compile(
-    r"(?:\b(?:status|sa[uú]de|health)\b.*\b(?:vps|hermes|servi[cç]os?)\b|"
-    r"\b(?:verifique|verificar)\b.*\b(?:vps|servi[cç]os?|crons?)\b|"
+    r"(?:\b(?:status|sa[uú]de|health)\b.*\b(?:vps|hermes|servi[cç]os?|projeto)\b|"
+    r"\b(?:verifique|verificar)\b.*\b(?:vps|servi[cç]os?|crons?|projeto)\b|"
     r"\b(?:corrija tudo|corrigir tudo|recupere os servi[cç]os|auto[- ]?recovery)\b|"
     r"\b(?:o que (?:voc[eê] )?corrigiu|hist[oó]rico (?:operacional|de corre[cç][oõ]es))\b|"
-    r"\b(?:reinicie|reiniciar)\b.*\b(?:gateway|router|llm|modelo|health|monitor|watchers?|api)\b|"
+    r"\b(?:reinicie|reiniciar)\b.*\b(?:gateway|router|llm|modelo|health|monitor|watchers?|api|projeto)\b|"
     r"\b(?:quais ferramentas|listar ferramentas|ferramentas)\b|"
     r"\b(?:quais projetos|listar projetos|liste os projetos|meus projetos)\b|"
+    r"\b(?:cadastre|cadastrar|adicione|adicionar|registre|registrar|remova|remover|apague|apagar|monitore|monitorar)\b.*\bprojeto\b|"
+    r"\b(?:status|como est[aá])\b.*\bprojeto\b|"
     r"\b(?:incidentes|incidentes recentes|problemas recentes|falhas recentes)\b|"
     r"\b(?:containers|docker ps|status do docker)\b|"
     r"\b(?:logs? do (?:gateway|llm|modelo|router))\b)",
