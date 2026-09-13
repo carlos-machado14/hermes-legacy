@@ -3,6 +3,7 @@ from __future__ import annotations
 import json, os, subprocess, sys, time
 from pathlib import Path
 import httpx, psutil, yaml
+from tools import run_tool, pretty
 
 ROOT = Path(__file__).resolve().parent
 CFG = ROOT / 'config.yaml'
@@ -54,12 +55,7 @@ def system_health() -> dict:
 
 def service_state(name: str) -> str:
     try:
-        p = subprocess.run(
-            ['systemctl', '--user', 'is-active', name],
-            text=True,
-            capture_output=True,
-            timeout=4,
-        )
+        p = subprocess.run(['systemctl', '--user', 'is-active', name], text=True, capture_output=True, timeout=4)
         return (p.stdout or p.stderr).strip() or 'unknown'
     except Exception:
         return 'unknown'
@@ -90,8 +86,8 @@ def format_health(data: dict) -> str:
     overall = 'OK' if service_ok and data.get('llm_ready') else 'ATENCAO'
     return (
         f'Hermes VPS: {overall}\n'
-        f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% "
-        f"({data['ram_available_mb']} MB livres) | Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
+        f"CPU: {data['cpu_percent']}% | RAM: {data['ram_percent']}% ({data['ram_available_mb']} MB livres) | "
+        f"Swap: {data['swap_percent']}% | Disco: {data['disk_percent']}%\n"
         f"Load: {data['load']} | Uptime: {data['uptime_hours']}h\n"
         f"LLM: {services.get('llm')} | Gateway: {services.get('gateway')} | Router: {services.get('router')}\n"
         f"LLM HTTP: {data.get('llm_http')} | Modelo pronto: {'sim' if data.get('llm_ready') else 'nao'}"
@@ -100,10 +96,22 @@ def format_health(data: dict) -> str:
 
 def route(text: str) -> str:
     t = text.lower().strip()
-    if any(k in t for k in ('status da vps', 'saude da vps', 'saúde da vps', 'verifique a vps', 'como esta a vps', 'como está a vps')):
+    if any(k in t for k in ('status da vps', 'saude da vps', 'saúde da vps', 'verifique a vps', 'como esta a vps', 'como está a vps')) or t in {'status', 'health', '/health'}:
         return 'health'
-    if t in {'status', 'health', '/health'}:
-        return 'health'
+    if any(k in t for k in ('servicos do hermes', 'serviços do hermes', 'status dos servicos', 'status dos serviços')):
+        return 'services'
+    if any(k in t for k in ('containers', 'docker ps', 'status do docker')):
+        return 'docker'
+    if any(k in t for k in ('status das crons', 'status da cron', 'cron status')):
+        return 'cron_status'
+    if any(k in t for k in ('listar crons', 'lista de crons', 'cron list')):
+        return 'cron_list'
+    if 'logs do gateway' in t or 'log do gateway' in t:
+        return 'gateway_logs'
+    if 'logs do llm' in t or 'log do llm' in t or 'logs do modelo' in t:
+        return 'llm_logs'
+    if 'logs do router' in t or 'log do router' in t:
+        return 'router_logs'
     return 'llm'
 
 
@@ -111,6 +119,8 @@ def ask(text: str) -> str:
     r = route(text)
     if r == 'health':
         return format_health(local_status())
+    if r in {'services', 'docker', 'cron_status', 'cron_list', 'gateway_logs', 'llm_logs', 'router_logs'}:
+        return pretty(run_tool(r))
     return llm(text)
 
 
