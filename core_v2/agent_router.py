@@ -11,6 +11,8 @@ from personal_memory import add_skill, remember_fact, summary as profile_summary
 from skill_registry import describe as skills_summary
 from research_engine import format_results
 from onboarding_parser import process as process_onboarding
+from proactive_engine import daily_brief, weekly_review, recommendation, continue_last, history as decision_history
+from decision_log import record
 
 
 def _after(text: str, markers: tuple[str, ...]) -> str:
@@ -40,21 +42,8 @@ def _money_advice() -> str:
         high = [t for t in tasks if t.get('priority') == 'high'] or tasks
         out.append(''); out.append('Próximas ações:')
         for i, task in enumerate(high[:5], 1): out.append(f"{i}. {task.get('title')}")
+        record('next_action', high[0].get('title',''), metadata={'task_id': high[0].get('id')})
     out.append(''); out.append('Minha prioridade é transformar isso em execução e receita, não só listar ideias.')
-    return '\n'.join(out)
-
-
-def _today_plan() -> str:
-    goals = list_goals(include_done=False); tasks = list_tasks(status='todo'); opportunities = list_opportunities()
-    if not opportunities: seed_from_profile(); opportunities = list_opportunities()
-    out = ['Plano de hoje:']
-    if goals: out.append(f"Objetivo principal: {goals[-1].get('title')}")
-    high = [t for t in tasks if t.get('priority') == 'high'] or tasks
-    if high:
-        out.append('Prioridades:')
-        for i, task in enumerate(high[:5], 1): out.append(f"{i}. {task.get('title')}")
-    if opportunities: out.append(f"Melhor oportunidade atual: {opportunities[0].get('title')} (score {opportunities[0].get('score',0)}/100)")
-    if not tasks: out.append('Ainda não há tarefas pendentes; peça "plano do objetivo <ID>" para gerar o plano.')
     return '\n'.join(out)
 
 
@@ -81,18 +70,18 @@ def handle(text: str) -> str | None:
     if any(k in low for k in ('quero ganhar ', 'meta de renda', 'meta de receita', 'quero faturar ')):
         inferred = infer_money_goal(t)
         if inferred:
-            g = create_goal(**inferred); return f"Objetivo financeiro criado: [{g['id']}] {g['title']}\nUse: plano do objetivo {g['id']}"
+            g = create_goal(**inferred); record('goal_created', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo financeiro criado: [{g['id']}] {g['title']}\nUse: plano do objetivo {g['id']}"
     if low.startswith('concluir objetivo ') or low.startswith('finalizar objetivo '):
         ref = _after(t, ('concluir objetivo', 'finalizar objetivo'))
-        try: g = complete_goal(ref); return f"Objetivo concluído: {g['title']}"
+        try: g = complete_goal(ref); record('goal_completed', g['title'], metadata={'goal_id': g['id']}); return f"Objetivo concluído: {g['title']}"
         except KeyError: return 'Objetivo não encontrado.'
     if low.startswith('plano do objetivo ') or low.startswith('planeje objetivo '): return plan_summary(_after(t, ('plano do objetivo', 'planeje objetivo')))
     if any(k in low for k in ('minhas tarefas', 'listar tarefas', 'tarefas pendentes')): return tasks_summary()
     if any(low.startswith(k) for k in ('crie tarefa ', 'criar tarefa ', 'nova tarefa ')):
-        task = create_task(_after(t, ('crie tarefa', 'criar tarefa', 'nova tarefa'))); return f"Tarefa criada: [{task['id']}] {task['title']}"
+        task = create_task(_after(t, ('crie tarefa', 'criar tarefa', 'nova tarefa'))); record('task_created', task['title'], metadata={'task_id': task['id']}); return f"Tarefa criada: [{task['id']}] {task['title']}"
     if low.startswith('concluir tarefa ') or low.startswith('marque tarefa '):
         ref = re.sub(r'\s+como\s+conclu[ií]da.*$', '', _after(t, ('concluir tarefa', 'marque tarefa')), flags=re.I).strip()
-        try: task = complete_task(ref); return f"Tarefa concluída: {task['title']}"
+        try: task = complete_task(ref); record('task_completed', task['title'], metadata={'task_id': task['id']}); return f"Tarefa concluída: {task['title']}"
         except KeyError: return 'Tarefa não encontrada.'
 
     money_phrases = (
@@ -103,7 +92,17 @@ def handle(text: str) -> str | None:
     )
     if any(k in low for k in money_phrases): seed_from_profile(); return _money_advice()
     if low in {'oportunidades', 'minhas oportunidades'}: return opportunities_summary()
-    if any(k in low for k in ('o que fazemos hoje', 'o que faço hoje', 'qual a prioridade', 'qual é a prioridade', 'o que devo fazer hoje')): return _today_plan()
+
+    if any(k in low for k in ('o que fazemos hoje', 'o que faço hoje', 'qual a prioridade', 'qual é a prioridade', 'o que devo fazer hoje', 'minha prioridade hoje')):
+        return daily_brief()
+    if any(k in low for k in ('como está minha semana', 'como esta minha semana', 'revisão da semana', 'revisao da semana', 'como estão meus objetivos', 'como estao meus objetivos')):
+        return weekly_review()
+    if any(k in low for k in ('o que você recomenda', 'o que voce recomenda', 'o que você faria no meu lugar', 'o que voce faria no meu lugar', 'o que devo mudar', 'qual objetivo está parado', 'qual objetivo esta parado')):
+        return recommendation()
+    if low in {'pode iniciar', 'pode começar', 'pode comecar', 'continue', 'continuar', 'vamos continuar', 'vamos seguir'}:
+        return continue_last()
+    if any(k in low for k in ('decisões recentes', 'decisoes recentes', 'histórico de decisões', 'historico de decisoes')):
+        return decision_history()
 
     if low.startswith('lembre que eu sei ') or low.startswith('eu sei '):
         skill = _after(t, ('lembre que eu sei', 'eu sei')); add_skill(skill); return f'Habilidade registrada: {skill}'
