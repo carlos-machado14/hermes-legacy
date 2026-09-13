@@ -20,7 +20,7 @@ TIMEOUT = config['llm'].get('timeout_seconds', 120)
 MAX_TOKENS = config['llm'].get('max_tokens', 320)
 
 
-def llm(prompt: str, system: str | None = None) -> str:
+def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
     system = system or ('Voce e Hermes Core, um agente local-first rodando na VPS. '
                         'Seja objetivo, nao invente resultados de ferramentas e priorize acoes deterministicas.')
     payload = {
@@ -30,7 +30,7 @@ def llm(prompt: str, system: str | None = None) -> str:
             {'role': 'user', 'content': prompt},
         ],
         'temperature': 0.2,
-        'max_tokens': MAX_TOKENS,
+        'max_tokens': max_tokens or MAX_TOKENS,
     }
     timeout = httpx.Timeout(connect=5.0, read=float(TIMEOUT), write=10.0, pool=5.0)
     with httpx.Client(timeout=timeout) as client:
@@ -118,17 +118,57 @@ def route(text: str) -> str:
     return 'llm'
 
 
+def _report_text(report: dict) -> str:
+    return json.dumps(report, ensure_ascii=False).lower()
+
+
+def deterministic_diagnosis(plan_name: str, report: dict) -> str | None:
+    text = _report_text(report)
+    if plan_name == 'diagnose_crons':
+        if 'non-streaming api call timed out' in text or 'timed out after 900s' in text or 'provider timeout' in text:
+            return (
+                'Diagnostico rapido:\n'
+                '- Causa: as crons estao falhando por timeout durante a chamada ao modelo/API local.\n'
+                '- Evidencia: os logs registram timeout em chamadas non-streaming/900s.\n'
+                '- Estado: o scheduler/gateway esta ativo; o problema ocorre durante a execucao da tarefa.\n'
+                '- Acao recomendada: reduzir o trabalho enviado ao LLM nas crons e mover coleta/filtro para codigo deterministico.\n'
+                '- Proximo passo: migrar as crons para collectors locais + resumo curto no Qwen.'
+            )
+        if 'failed' in text and 'cron' in text:
+            return (
+                'Diagnostico rapido:\n'
+                '- Existem crons com falha registrada.\n'
+                '- O scheduler respondeu, entao a falha e de execucao, nao de agendamento.\n'
+                '- Consulte a ultima execucao e os logs do gateway/LLM para a causa especifica.'
+            )
+        if 'gateway is running' in text and 'active job' in text:
+            return (
+                'Diagnostico rapido:\n'
+                '- Scheduler e gateway estao ativos.\n'
+                '- Nao encontrei um padrao de erro conhecido nas evidencias coletadas.\n'
+                '- Proximo passo: inspecionar a ultima execucao de cada cron.'
+            )
+    if plan_name == 'diagnose_services':
+        if 'inactive' in text or 'failed' in text:
+            return 'Diagnostico rapido: ha pelo menos um servico inativo ou com falha. Verifique o bloco de services e o journal correspondente.'
+        if 'active' in text:
+            return 'Diagnostico rapido: os servicos principais estao ativos; nao ha falha basica de systemd nas evidencias coletadas.'
+    return None
+
+
 def diagnose_with_plan(text: str, plan_name: str) -> str:
     report = execute_plan(plan_name)
-    evidence = compact_for_llm(report)
+    fast = deterministic_diagnosis(plan_name, report)
+    if fast:
+        return fast
+    evidence = compact_for_llm(report, max_chars=2200)
     prompt = (
-        'Analise somente as evidencias reais abaixo. Responda em portugues com: '
-        '1) causa mais provavel, 2) evidencias, 3) proxima acao segura. '
-        'Nao invente dados e seja curto.\n\n'
-        f'Pedido: {text}\n\nEvidencias:\n{evidence}'
+        'Analise somente as evidencias reais abaixo. Responda em portugues em no maximo 5 linhas: '
+        'causa provavel, evidencia principal e proxima acao segura. Nao invente dados.\n\n'
+        f'Pedido: {text}\nEvidencias:\n{evidence}'
     )
     try:
-        return llm(prompt)
+        return llm(prompt, max_tokens=120)
     except Exception:
         return 'Diagnostico coletado, mas o LLM nao respondeu. Evidencias:\n' + pretty(report)
 
