@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -22,14 +23,102 @@ CRON_RE = re.compile(
 )
 
 
-def _authorized(gateway: Any, source: Any) -> bool:
+def _env_value(name: str) -> str:
+    value = (os.getenv(name) or '').strip()
+    if value:
+        return value
+    env_file = Path.home() / '.hermes' / '.env'
     try:
-        result = bool(gateway._is_user_authorized_for_source(source))
-        logger.info("fastpath auth=%s platform=%s chat=%s user=%s", result, getattr(getattr(source, 'platform', None), 'value', None), getattr(source, 'chat_id', None), getattr(source, 'user_id', None))
-        return result
-    except Exception as exc:
-        logger.exception("fastpath auth check failed: %s", exc)
+        for line in env_file.read_text(encoding='utf-8').splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith('#') or '=' not in raw:
+                continue
+            key, val = raw.split('=', 1)
+            if key.strip() == name:
+                return val.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ''
+
+
+def _allowlist_contains(raw: str, user_id: Any) -> bool:
+    uid = str(user_id or '').strip()
+    if not uid:
         return False
+    allowed = {part.strip() for part in str(raw or '').split(',') if part.strip()}
+    return '*' in allowed or uid in allowed
+
+
+def _authorized(gateway: Any, source: Any) -> bool:
+    """Authorize safely across old and new Hermes Gateway versions.
+
+    pre_gateway_dispatch runs before the gateway's normal auth gate, so this helper
+    must fail closed. Newer Hermes exposes _is_user_authorized_for_source; older
+    installs do not, so we fall back to the already-approved pairing store and
+    explicit allowlists only. We never default to allow-all.
+    """
+    platform = str(getattr(getattr(source, 'platform', None), 'value', '') or '').strip().lower()
+    user_id = getattr(source, 'user_id', None)
+    chat_id = getattr(source, 'chat_id', None)
+
+    checker = getattr(gateway, '_is_user_authorized_for_source', None)
+    if callable(checker):
+        try:
+            result = bool(checker(source))
+            logger.info("fastpath auth=native result=%s platform=%s chat=%s user=%s", result, platform, chat_id, user_id)
+            return result
+        except Exception as exc:
+            logger.warning("fastpath native auth failed, trying compatibility path: %s", exc)
+
+    # Legacy Hermes: approved DM pairing is a first-class authorization grant.
+    stores = []
+    store_for = getattr(gateway, '_pairing_store_for', None)
+    if callable(store_for):
+        try:
+            stores.append(store_for(source))
+        except Exception:
+            pass
+    stores.append(getattr(gateway, 'pairing_store', None))
+    for store in stores:
+        if store is None:
+            continue
+        approved = getattr(store, 'is_approved', None)
+        if callable(approved):
+            try:
+                if bool(approved(platform, str(user_id))):
+                    logger.info("fastpath auth=pairing result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
+                    return True
+            except Exception as exc:
+                logger.debug("fastpath pairing auth check failed: %s", exc)
+
+    # Explicit per-platform and global allowlists. This mirrors the common Hermes
+    # configuration without weakening the gateway: missing lists remain DENY.
+    env_name = {
+        'telegram': 'TELEGRAM_ALLOWED_USERS',
+        'discord': 'DISCORD_ALLOWED_USERS',
+        'whatsapp': 'WHATSAPP_ALLOWED_USERS',
+        'whatsapp_cloud': 'WHATSAPP_CLOUD_ALLOWED_USERS',
+        'slack': 'SLACK_ALLOWED_USERS',
+        'signal': 'SIGNAL_ALLOWED_USERS',
+    }.get(platform)
+    if env_name and _allowlist_contains(_env_value(env_name), user_id):
+        logger.info("fastpath auth=platform_allowlist result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
+        return True
+    if _allowlist_contains(_env_value('GATEWAY_ALLOWED_USERS'), user_id):
+        logger.info("fastpath auth=global_allowlist result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
+        return True
+
+    # Honor allow-all only when the operator explicitly enabled it.
+    allow_all_name = f"{platform.upper()}_ALLOW_ALL_USERS" if platform else ''
+    if allow_all_name and _env_value(allow_all_name).lower() in {'1', 'true', 'yes'}:
+        logger.warning("fastpath auth=explicit_allow_all result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
+        return True
+    if _env_value('GATEWAY_ALLOW_ALL_USERS').lower() in {'1', 'true', 'yes'}:
+        logger.warning("fastpath auth=explicit_global_allow_all result=True platform=%s chat=%s user=%s", platform, chat_id, user_id)
+        return True
+
+    logger.warning("fastpath auth=compat result=False platform=%s chat=%s user=%s", platform, chat_id, user_id)
+    return False
 
 
 def _run_core(text: str) -> str:
@@ -38,11 +127,8 @@ def _run_core(text: str) -> str:
     core = root / 'hermes_core.py'
     logger.info("fastpath -> core text=%r", text[:180])
     proc = subprocess.run(
-        [str(py), str(core), text],
-        text=True,
-        capture_output=True,
-        timeout=40,
-        cwd=str(root),
+        [str(py), str(core), text], text=True, capture_output=True,
+        timeout=40, cwd=str(root),
     )
     logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
     if proc.returncode != 0:
@@ -57,11 +143,8 @@ def _run_cron(text: str) -> str:
     encoded = base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
     logger.info("fastpath -> cron text=%r", text[:180])
     proc = subprocess.run(
-        [str(py), str(manager), '--text-b64', encoded],
-        text=True,
-        capture_output=True,
-        timeout=30,
-        cwd=str(root),
+        [str(py), str(manager), '--text-b64', encoded], text=True,
+        capture_output=True, timeout=30, cwd=str(root),
     )
     raw = (proc.stdout or '').strip()
     logger.info("fastpath cron rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(raw), len(proc.stderr or ''))
@@ -102,13 +185,10 @@ def pre_gateway_dispatch(**kwargs):
     logger.info("fastpath inbound text=%r platform=%s chat=%s", text[:180], getattr(getattr(source, 'platform', None), 'value', None) if source else None, getattr(source, 'chat_id', None) if source else None)
 
     if not text or source is None:
-        logger.info("fastpath allow: empty text/source")
         return None
     if not _authorized(gateway, source):
-        logger.info("fastpath allow: unauthorized")
+        logger.info("fastpath allow legacy path: sender not authorized by compatibility gate")
         return None
-
-    # Preserve explicit Hermes/Gateway slash commands such as /reset and /compress.
     if text.startswith('/'):
         logger.info("fastpath allow slash command=%r", text[:80])
         return None
@@ -128,5 +208,5 @@ def pre_gateway_dispatch(**kwargs):
 
 
 def register(ctx):
-    logger.warning("HERMES CORE FASTPATH v1.1.0 REGISTERED")
+    logger.warning("HERMES CORE FASTPATH v1.1.1 REGISTERED")
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
