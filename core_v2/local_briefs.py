@@ -20,38 +20,18 @@ HOME = Path.home()
 ROOT = HOME / ".hermes" / "core-v2"
 STATE = ROOT / "state"
 
-# Todas as fontes de notícias são consultadas com localização pt-BR para que
-# as crons entreguem conteúdo em português sem depender do LLM para tradução.
 FEEDS = {
     "ai": [
-        (
-            "Notícias de IA",
-            "https://news.google.com/rss/search?q=intelig%C3%AAncia+artificial+IA+tecnologia&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
-        (
-            "IA e modelos",
-            "https://news.google.com/rss/search?q=OpenAI+Google+Gemini+Claude+modelos+IA&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
+        ("Notícias de IA", "https://news.google.com/rss/search?q=intelig%C3%AAncia+artificial+IA+tecnologia&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
+        ("IA e modelos", "https://news.google.com/rss/search?q=OpenAI+Google+Gemini+Claude+modelos+IA&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
     ],
     "marketing": [
-        (
-            "Marketing Digital",
-            "https://news.google.com/rss/search?q=marketing+digital+vendas+leads+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
-        (
-            "Negócios e aquisição",
-            "https://news.google.com/rss/search?q=neg%C3%B3cios+aquisi%C3%A7%C3%A3o+clientes+SEO+redes+sociais&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
+        ("Marketing Digital", "https://news.google.com/rss/search?q=marketing+digital+vendas+leads+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
+        ("Negócios e aquisição", "https://news.google.com/rss/search?q=neg%C3%B3cios+aquisi%C3%A7%C3%A3o+clientes+SEO+redes+sociais&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
     ],
     "product": [
-        (
-            "Startups e Produtos",
-            "https://news.google.com/rss/search?q=startups+novos+produtos+tecnologia+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
-        (
-            "SaaS e oportunidades",
-            "https://news.google.com/rss/search?q=SaaS+aplicativos+inova%C3%A7%C3%A3o+oportunidades+neg%C3%B3cios&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-        ),
+        ("Startups e Produtos", "https://news.google.com/rss/search?q=startups+novos+produtos+tecnologia+Brasil&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
+        ("SaaS e oportunidades", "https://news.google.com/rss/search?q=SaaS+aplicativos+inova%C3%A7%C3%A3o+oportunidades+neg%C3%B3cios&hl=pt-BR&gl=BR&ceid=BR:pt-419"),
     ],
 }
 
@@ -72,7 +52,6 @@ def fetch_feed(source: str, url: str) -> list[dict]:
         parsed = feedparser.parse(r.content)
     except Exception as exc:
         return [{"source": source, "error": str(exc)}]
-
     items = []
     for e in parsed.entries[:8]:
         title = clean(getattr(e, "title", ""), 170)
@@ -83,30 +62,25 @@ def fetch_feed(source: str, url: str) -> list[dict]:
 
 
 def dedupe(items: Iterable[dict]) -> list[dict]:
-    seen = set()
-    out = []
+    seen = set(); out = []
     for item in items:
         if item.get("error"):
             continue
         key = re.sub(r"\W+", "", item.get("title", "").lower())[:100]
         if not key or key in seen:
             continue
-        seen.add(key)
-        out.append(item)
+        seen.add(key); out.append(item)
     return out
 
 
 def render_news(kind: str, title: str, intro: str) -> str:
-    collected: list[dict] = []
-    errors: list[str] = []
+    collected: list[dict] = []; errors: list[str] = []
     for source, url in FEEDS[kind]:
-        rows = fetch_feed(source, url)
-        for row in rows:
+        for row in fetch_feed(source, url):
             if row.get("error"):
                 errors.append(f"{source}: {row['error'][:90]}")
             else:
                 collected.append(row)
-
     items = dedupe(collected)[:MAX_ITEMS]
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
     lines = [f"🇧🇷 {title}", f"Atualizado em: {now}", "", intro, ""]
@@ -170,43 +144,44 @@ def render_finance() -> str:
             lines.append(f"Fonte local recuperada: {source}")
         return "\n".join(lines)
 
+    declared = list(resolved.get("legacy_declared_subscriptions") or [])
+    declared_source = resolved.get("legacy_declared_source")
+    if declared:
+        lines.append("✅ Recuperei da sua sessão antiga as assinaturas que você declarou explicitamente:")
+        lines.append("")
+        for i, name in enumerate(declared, 1):
+            lines.append(f"{i}. {name} — valor ainda não recuperado")
+        lines.append("")
+        lines.append("Esses nomes vieram de uma mensagem sua, não de estimativa do Hermes.")
+        lines.append("Os valores exatos não apareceram nessa sessão; nela você escolheu simular valores estimados. Por isso não vou gravar preços inventados como se fossem seus gastos reais.")
+        if declared_source:
+            lines.append(f"Fonte recuperada: {declared_source}")
+        return "\n".join(lines)
+
     evidence = list(resolved.get("evidence") or [])
     if evidence:
-        lines.append("⚠️ Encontrei registros antigos que parecem conter dados reais de assinatura/cobrança, mas ainda não consegui convertê-los com segurança para a estrutura atual.")
+        lines.append("⚠️ Encontrei trechos com assunto financeiro e valores, mas eles não estão estruturados o suficiente para assumir que são seus gastos.")
         lines.append("")
         for item in evidence[:8]:
             lines.append(f"• Fonte: {item.get('path')}")
             lines.append(f"  {item.get('snippet')}")
         lines.append("")
-        lines.append("Não vou substituir esses dados nem inventar valores. O próximo passo é migrar esses registros para a base estruturada preservando a origem.")
+        lines.append("Não vou transformar pesquisas web, respostas do agente ou estimativas em despesas reais automaticamente.")
         return "\n".join(lines)
 
-    lines.append("⚠️ Não encontrei uma base estruturada nem evidência financeira concreta nos diretórios locais pesquisados.")
-    lines.append("Importante: menções genéricas a 'finance', objetivos de renda, agentes ou conversas não são mais tratadas como dados de assinatura.")
-    lines.append("O upgrade não cria dados vazios como se fossem seus dados antigos e não remove arquivos existentes.")
+    lines.append("⚠️ Não encontrei uma base estruturada nem uma lista explícita de assinaturas com valores reais.")
+    lines.append("O Hermes não vai inventar ou substituir gastos ausentes.")
     return "\n".join(lines)
 
 
 def main() -> int:
     kind = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
     if kind == "ai":
-        print(render_news(
-            "ai",
-            "Resumo Diário de Inteligência Artificial",
-            "Principais notícias e movimentos de IA selecionados para você:",
-        ))
+        print(render_news("ai", "Resumo Diário de Inteligência Artificial", "Principais notícias e movimentos de IA selecionados para você:"))
     elif kind == "marketing":
-        print(render_news(
-            "marketing",
-            "Resumo de Marketing e Leads",
-            "Destaques sobre aquisição de clientes, marketing e vendas:",
-        ))
+        print(render_news("marketing", "Resumo de Marketing e Leads", "Destaques sobre aquisição de clientes, marketing e vendas:"))
     elif kind == "product":
-        print(render_news(
-            "product",
-            "Oportunidades de Produto e Negócios",
-            "Sinais de mercado, startups, produtos e oportunidades relevantes:",
-        ))
+        print(render_news("product", "Oportunidades de Produto e Negócios", "Sinais de mercado, startups, produtos e oportunidades relevantes:"))
     elif kind == "finance":
         print(render_finance())
     else:
