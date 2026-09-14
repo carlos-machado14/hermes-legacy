@@ -11,6 +11,7 @@ from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from developer_router import handle as handle_developer_command
 from mission_router import handle as handle_mission_command
+from web_router import handle as handle_web_command
 
 _original_llm = hermes_core.llm
 
@@ -58,19 +59,23 @@ def ask(text: str) -> str:
     if mission_reply is not None:
         reply = mission_reply
     else:
-        developer_reply = handle_developer_command(text)
-        if developer_reply is not None:
-            reply = developer_reply
+        web_reply = handle_web_command(text)
+        if web_reply is not None:
+            reply = web_reply
         else:
-            memory_reply = handle_memory_command(text)
-            if memory_reply is not None:
-                reply = memory_reply
+            developer_reply = handle_developer_command(text)
+            if developer_reply is not None:
+                reply = developer_reply
             else:
-                contextual = handle_contextual(text)
-                if contextual is not None:
-                    reply = contextual
+                memory_reply = handle_memory_command(text)
+                if memory_reply is not None:
+                    reply = memory_reply
                 else:
-                    reply = hermes_core.ask(text)
+                    contextual = handle_contextual(text)
+                    if contextual is not None:
+                        reply = contextual
+                    else:
+                        reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
@@ -80,7 +85,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4 conversational entry + Memory Vault + Durable Missions + GitHub Workspace', flush=True)
+        print('Hermes Core v4.1 + Durable Missions + Real Web Research + Browser + Memory + GitHub', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
