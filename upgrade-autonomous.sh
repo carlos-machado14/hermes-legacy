@@ -37,6 +37,9 @@ printf '\n=== Exigindo confirmacao para mutacoes de rotinas ===\n'
 printf '\n=== Instalando Action Orchestrator universal ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_action_orchestrator_v1.py"
 
+printf '\n=== Instalando Semantic Agent V2 como cerebro primario ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_semantic_agent_v2.py"
+
 printf '\n=== Ativando alertas proativos de incidentes ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_proactive_incident_alerts_v1.py"
 
@@ -46,13 +49,18 @@ printf '\n=== Validando confirmacao de rotinas ===\n'
 printf '\n=== Validando orquestracao universal ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_action_orchestrator.py"
 
+printf '\n=== Validando Semantic Agent V2 ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_semantic_agent_v2.py"
+
 printf '\n=== Validacoes ===\n'
 printf 'Fast Router: '; curl -fsS http://127.0.0.1:8089/health || true; echo
 printf 'Core API: '; curl -fsS http://127.0.0.1:8090/health || true; echo
 printf 'SearXNG: '; curl -fsS 'http://127.0.0.1:8087/search?q=hermes&format=json' >/dev/null 2>&1 && echo active || echo unavailable
 printf 'Conversation entry: '; test -x "$HOME/.hermes/core-v2/core_entry.py" && echo active || echo missing
+printf 'Semantic Agent: '; test -f "$HOME/.hermes/core-v2/semantic_agent.py" && echo active || echo missing
 printf 'Action Orchestrator: '; test -f "$HOME/.hermes/core-v2/action_orchestrator.py" && echo active || echo missing
 printf 'Action Journal: '; test -f "$HOME/.hermes/core-v2/logs/action_journal.jsonl" && echo active || echo ready-on-first-action
+printf 'Semantic Journal: '; test -f "$HOME/.hermes/core-v2/logs/semantic_agent.jsonl" && echo active || echo ready-on-first-message
 printf 'Operational policy: '; test -f "$HOME/.hermes/core-v2/state/operational_policy.json" && echo active || echo ready-on-first-action
 printf 'Optional Freud bridge code: '; test -f "$HOME/.hermes/core-v2/freud_broker_client.py" && echo available || echo missing
 printf 'Memory Vault: '; test -d "$HOME/.hermes/memory" && echo active || echo missing
@@ -77,10 +85,12 @@ printf '\n=== Smoke tests v4.5 ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$HOME/.hermes/core-v2/core_entry.py" 'status web'
 
 echo
-echo 'OK: Hermes v4.5 instalado em modo independente.'
+echo 'OK: Hermes atualizado em modo agente semantico geral.'
+echo 'Semantic Agent V2: interpreta objetivo e contexto antes de escolher ferramentas.'
 echo 'Action Orchestrator: entender -> coletar dados -> confirmar -> executar -> validar -> registrar.'
 echo 'Contexto conversacional por chat, journal operacional, retry seguro e alertas proativos: ativos.'
-echo 'Mutações de rotina agora exigem confirmação explícita.'
+echo 'Mutações de rotina e ações externas sensíveis exigem confirmação explícita.'
+echo 'Regex permanece apenas como guarda/compatibilidade; não é o cérebro principal.'
 echo 'Hermes continua funcionando sozinho com memoria, web, browser, missoes, agentes e automacoes.'
 echo 'Ponte Hermes <-> Freud existe apenas como capacidade opcional futura e fica inativa sem configuracao explicita.'
 echo 'Nenhuma conexao entre VPSs e exigida.'
