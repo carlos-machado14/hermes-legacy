@@ -19,7 +19,7 @@ chmod +x install-core-v2.sh install-v4-runtime.sh install-web-research.sh instal
 ./install-gateway-fastpath-plugin.sh
 
 printf '\n=== Aplicando correcoes de roteamento atual e linguagem natural ===\n'
-"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_realtime_and_natural_cron.py"
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_realtime_and_natural_cron_v2.py"
 
 printf '\n=== Validacoes ===\n'
 printf 'Fast Router: '; curl -fsS http://127.0.0.1:8089/health || true; echo
