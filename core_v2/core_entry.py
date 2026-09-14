@@ -37,10 +37,11 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
         'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
         'Dados financeiros estruturados locais, quando existentes, são a fonte de verdade para gastos recorrentes; atualizações explícitas do usuário devem ser persistidas pelo roteador financeiro antes do LLM. '
+        'Comandos de rotina, cron e briefing devem ser executados diretamente pelo gerenciador local quando puderem ser resolvidos deterministicamente, sem transformar uma alteração simples em missão longa. '
         'Quando houver identidade delegada, ferramentas conectadas como agenda, e-mail, GitHub e comunicação são executadas pelo Freud no contexto autenticado do usuário. '
         'Credenciais de usuário nunca pertencem ao Hermes e nunca devem ser solicitadas pelo modelo quando o Freud puder fornecer uma integração. '
         'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
-        'Para tarefas longas, continue sozinho por meio do runtime durável até concluir ou encontrar bloqueio real. '
+        'Para tarefas realmente longas, continue sozinho por meio do runtime durável até concluir ou encontrar bloqueio real. '
     )
     if system:
         base_system += '\n' + system
@@ -80,20 +81,24 @@ def _web_reply(text: str) -> str | None:
         return None
 
 
-def _cron_status_reply(text: str) -> str | None:
+def _cron_management_reply(text: str) -> str | None:
     low = text.casefold()
-    if not any(k in low for k in ('rotina', 'cron', 'lembrete', 'job')):
+    routine_terms = ('rotina', 'rotinas', 'cron', 'crons', 'lembrete', 'lembretes', 'job', 'jobs', 'brief', 'briefing')
+    if not any(k in low for k in routine_terms):
         return None
-    hints = (
-        'devia', 'deveria', 'rodou', 'executou', 'executada', 'executado',
-        'não veio', 'nao veio', 'não rodou', 'nao rodou', 'cadê', 'cade',
-        'status', 'horário', 'horario', 'que horas',
+    action_terms = (
+        'devia', 'deveria', 'rodou', 'executou', 'executada', 'executado', 'não veio', 'nao veio',
+        'não rodou', 'nao rodou', 'cadê', 'cade', 'status', 'horário', 'horario', 'que horas',
+        'atualiza', 'atualizar', 'melhora', 'melhorar', 'ajusta', 'ajustar', 'muda', 'mudar',
+        'configure', 'configurar', 'crie', 'criar', 'adicione', 'adicionar', 'agende', 'agendar',
+        'pause', 'pausar', 'pare', 'parar', 'retome', 'retomar', 'remova', 'remover', 'apague',
+        'apagar', 'rode', 'rodar', 'execute', 'executar', 'liste', 'listar', 'quais', 'minhas',
     )
-    if not any(k in low for k in hints):
+    if not any(k in low for k in action_terms):
         return None
     try:
-        from cron_manager import lifecycle
-        return lifecycle(text)
+        from cron_manager import handle
+        return handle(text)
     except Exception:
         return None
 
@@ -104,7 +109,7 @@ def ask(text: str) -> str:
     if finance_reply is not None:
         reply = finance_reply
     else:
-        cron_reply = _cron_status_reply(text)
+        cron_reply = _cron_management_reply(text)
         if cron_reply is not None:
             reply = cron_reply
         else:
