@@ -243,9 +243,21 @@ def _status_report() -> str:
 
 def _looks_like_brief_update(text: str) -> bool:
     t = norm(text)
-    action = any(k in t for k in ("atualiza", "atualizar", "melhora", "melhorar", "ajusta", "ajustar", "muda", "mudar", "configure", "configurar"))
-    target = any(k in t for k in ("rotina", "rotinas", "brief", "briefing", "resumo", "noticias", "noticia"))
-    return action and target
+    target = any(k in t for k in ("rotina", "rotinas", "brief", "briefing", "resumo", "resumos", "noticias", "noticia", "dados que vem das rotinas"))
+    if not target:
+        return False
+    explicit_actions = (
+        "atualiza", "atualizar", "melhora", "melhorar", "ajusta", "ajustar", "muda", "mudar",
+        "configure", "configurar", "deixa", "deixar", "quero que", "quero os", "quero as", "venham",
+        "traga", "trazer", "mostre", "mostrar",
+    )
+    detail_hints = (
+        "mais detalhe", "mais detalhes", "mais detalhado", "mais detalhada", "mais detalhados", "mais detalhadas",
+        "mais completo", "mais completa", "mais completos", "mais completas", "resumo maior", "aprofund",
+        "com contexto", "sem abrir o link", "sem precisar clicar", "sem que eu precise clicar", "sem abrir link",
+        "mais curto", "mais resumido", "resumo curto", "sem link", "sem links", "com link", "com links",
+    )
+    return any(k in t for k in explicit_actions) or any(k in t for k in detail_hints)
 
 
 def update_brief_preferences(text: str) -> str | None:
@@ -254,7 +266,7 @@ def update_brief_preferences(text: str) -> str | None:
     t = norm(text)
     prefs = load_brief_prefs()
     changed: list[str] = []
-    if any(k in t for k in ("resumo de cada", "resuma cada", "resumo cada", "sem precisar clicar", "sem que eu precise clicar", "sem abrir o link", "sem abrir link", "ler toda a materia", "ler toda materia")):
+    if any(k in t for k in ("resumo de cada", "resuma cada", "resumo cada", "sem precisar clicar", "sem que eu precise clicar", "sem abrir o link", "sem abrir link", "ler toda a materia", "ler toda materia", "com contexto")):
         prefs["include_summary"] = True
         prefs["links_are_optional"] = True
         prefs["summary_chars"] = max(int(prefs.get("summary_chars") or 520), 700)
@@ -265,7 +277,7 @@ def update_brief_preferences(text: str) -> str | None:
     elif any(k in t for k in ("mantenha o link", "pode manter o link", "com link", "com links")):
         prefs["include_links"] = True
         changed.append("links mantidos apenas como fonte")
-    if any(k in t for k in ("mais detalhe", "mais detalhes", "mais detalhado", "mais detalhada", "mais completo", "mais completa", "resumo maior", "aprofund")):
+    if any(k in t for k in ("mais detalhe", "mais detalhes", "mais detalhado", "mais detalhada", "mais detalhados", "mais detalhadas", "mais completo", "mais completa", "mais completos", "mais completas", "resumo maior", "aprofund")):
         prefs["summary_chars"] = 900
         prefs["include_summary"] = True
         prefs["detail_level"] = "detailed"
