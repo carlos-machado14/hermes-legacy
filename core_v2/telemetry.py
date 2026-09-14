@@ -35,19 +35,23 @@ def _safe(value: Any) -> Any:
 
 
 def emit(stage: str, *, elapsed_ms: float | None = None, **fields: Any) -> None:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    row = {
-        'ts': time.time(),
-        'trace_id': trace_id(),
-        'stage': str(stage),
-    }
-    if elapsed_ms is not None:
-        row['elapsed_ms'] = round(float(elapsed_ms), 2)
-    row.update({str(k): _safe(v) for k, v in fields.items()})
-    line = json.dumps(row, ensure_ascii=False, separators=(',', ':'))
-    with _LOCK:
-        with PERF_LOG.open('a', encoding='utf-8') as f:
-            f.write(line + '\n')
+    """Best-effort telemetry: observability must never break the user path."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        row = {
+            'ts': time.time(),
+            'trace_id': trace_id(),
+            'stage': str(stage),
+        }
+        if elapsed_ms is not None:
+            row['elapsed_ms'] = round(float(elapsed_ms), 2)
+        row.update({str(k): _safe(v) for k, v in fields.items()})
+        line = json.dumps(row, ensure_ascii=False, separators=(',', ':'))
+        with _LOCK:
+            with PERF_LOG.open('a', encoding='utf-8') as f:
+                f.write(line + '\n')
+    except Exception:
+        return
 
 
 class Span:
