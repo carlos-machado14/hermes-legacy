@@ -8,13 +8,20 @@ from universal_planner import build
 
 def _capability_summary() -> str:
     grouped: dict[str, list[str]] = {}
+    connected: list[str] = []
     for item in list_capabilities():
-        grouped.setdefault(item['domain'], []).append(item['name'])
-    lines = ['Hermes v4.2 — Universal Agent Runtime', '', 'Domínios/capacidades:']
+        label = item['name']
+        if item.get('execution') == 'freud':
+            label += ' (Freud)'
+            connected.append(item['name'])
+        grouped.setdefault(item['domain'], []).append(label)
+    lines = ['Hermes v4.4 — Connected Universal Assistant', '', 'Domínios/capacidades:']
     for domain in sorted(grouped):
         lines.append(f"- {domain}: {', '.join(grouped[domain])}")
     lines.append('')
     lines.append('Agentes especialistas: ' + ', '.join(sorted(list_agents())))
+    lines.append(f'Capacidades conectadas via Freud: {len(connected)}')
+    lines.append('Credenciais de usuário permanecem no Freud/banco criptografado; o Hermes apenas seleciona ferramentas no contexto autenticado.')
     lines.append('O Hermes continua sendo uma única inteligência; especialistas são papéis internos coordenados pelo mesmo contexto/memória.')
     return '\n'.join(lines)
 
@@ -22,7 +29,11 @@ def _capability_summary() -> str:
 def handle(text: str) -> str | None:
     raw = text.strip()
     low = raw.casefold()
-    if low in {'status universal','status do agente','status hermes','capacidades','minhas capacidades','o que voce sabe fazer','o que você sabe fazer'}:
+    if low in {
+        'status universal','status do agente','status hermes','capacidades',
+        'minhas capacidades','o que voce sabe fazer','o que você sabe fazer',
+        'status conectado','status connected','status freud',
+    }:
         return _capability_summary()
     if low in {'agentes','meus agentes','agentes disponiveis','agentes disponíveis'}:
         lines = ['Agentes internos do Hermes:']
@@ -36,7 +47,10 @@ def handle(text: str) -> str | None:
     if low.startswith('planeje universal ') or low.startswith('plano universal '):
         body = raw.split(' ', 2)[2].strip()
         plan = build(body)
-        lines = [f"Rota: {plan['route'].get('primary_domain','geral')} / {plan['route'].get('agent','general')}", 'Definition of Done:']
+        lines = [
+            f"Rota: {plan['route'].get('primary_domain','geral')} / {plan['route'].get('agent','general')}",
+            'Definition of Done:',
+        ]
         for item in plan.get('definition_of_done') or []:
             lines.append(f'- {item}')
         lines.append('Plano:')
