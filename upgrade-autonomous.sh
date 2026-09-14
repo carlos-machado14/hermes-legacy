@@ -24,6 +24,9 @@ printf '\n=== Aplicando correcoes de roteamento atual e linguagem natural ===\n'
 printf '\n=== Aplicando confirmacao conversacional de rotinas ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_routine_confirmation_v1.py"
 
+printf '\n=== Reparando ordem de execucao do cron manager ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/repair_routine_confirmation_guard.py"
+
 printf '\n=== Validando confirmacao de rotinas ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_routine_confirmation.py"
 
