@@ -28,9 +28,6 @@ from crm_engine import summary as crm_summary, hot_leads, followups_due
 from opportunity_hunter import hunt
 from deep_research import research as deep_research
 from learning_engine import ranked_signals, record_outcome
-from web_search_engine import health as web_health, search as web_search
-from site_auditor import audit as site_audit
-from site_crawler import crawl as site_crawl
 
 ROOT = Path.home() / '.hermes/core-v2'
 HOST = os.getenv('HERMES_CORE_API_HOST', '127.0.0.1')
@@ -59,6 +56,14 @@ def _run_core(message: str) -> tuple[int,str]:
     return p.returncode,(p.stdout or p.stderr or '').strip()
 
 
+def _web_health() -> dict:
+    try:
+        from web_search_engine import health
+        return health()
+    except Exception as exc:
+        return {'ok':False,'error':str(exc)}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version='HermesCoreAPI/4.1'
     def log_message(self,fmt: str,*args) -> None: return
@@ -70,7 +75,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard(): return
         path=urlparse(self.path).path
         if path=='/health': _json(self,200,{'ok':True,'version':'4.1','api':'active','mode':'durable-autonomous-web-runtime'})
-        elif path=='/web/status': _json(self,200,web_health())
+        elif path=='/web/status': _json(self,200,_web_health())
         elif path=='/events': _json(self,200,{'ok':True,'events':recent_events(100)})
         elif path=='/memory': _json(self,200,{'ok':True,'memory':recent_memory(100)})
         elif path=='/incidents': _json(self,200,{'ok':True,'incidents':recent_incidents(100)})
@@ -108,16 +113,26 @@ class Handler(BaseHTTPRequestHandler):
             query=str(body.get('query') or '').strip()
             if not query: _json(self,400,{'ok':False,'error':'query_required'})
             else:
-                try: _json(self,200,{'ok':True,'results':web_search(query,int(body.get('limit',8)))})
+                try:
+                    from web_search_engine import search
+                    _json(self,200,{'ok':True,'results':search(query,int(body.get('limit',8)))})
                 except Exception as exc: _json(self,503,{'ok':False,'error':str(exc)})
         elif path=='/web/audit':
             url=str(body.get('url') or '').strip()
             if not url: _json(self,400,{'ok':False,'error':'url_required'})
-            else: _json(self,200,site_audit(url))
+            else:
+                try:
+                    from site_auditor import audit
+                    _json(self,200,audit(url))
+                except Exception as exc: _json(self,503,{'ok':False,'error':str(exc)})
         elif path=='/web/crawl':
             url=str(body.get('url') or '').strip()
             if not url: _json(self,400,{'ok':False,'error':'url_required'})
-            else: _json(self,200,site_crawl(url,int(body.get('max_pages',5))))
+            else:
+                try:
+                    from site_crawler import crawl
+                    _json(self,200,crawl(url,int(body.get('max_pages',5))))
+                except Exception as exc: _json(self,503,{'ok':False,'error':str(exc)})
         elif path=='/proactive/enable': _json(self,200,{'ok':True,'settings':enable_proactive()})
         elif path=='/proactive/disable': _json(self,200,{'ok':True,'settings':disable_proactive()})
         elif path=='/autonomy/enable': _json(self,200,{'ok':True,'settings':enable_autonomy()})
