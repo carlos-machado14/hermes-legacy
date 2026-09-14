@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from audit_log import record as audit_record
 from job_store import create_job, get_job, list_jobs, recover_interrupted, update_job
 
 
@@ -13,6 +14,11 @@ def _fmt(job: dict) -> str:
     total = len(job.get('plan') or [])
     extra = f' etapa {step}/{total}' if total else ''
     return f'[{jid}] {status}{extra} — {title}'
+
+
+def _find_ref(low: str, action: str) -> str | None:
+    m = re.search(rf'\b{action}\s+(?:o\s+|a\s+)?(?:job|miss[aã]o)?\s*([0-9a-f]{{6,16}})\b', low)
+    return m.group(1) if m else None
 
 
 def handle(text: str) -> str | None:
@@ -37,11 +43,34 @@ def handle(text: str) -> str | None:
             parts.append('Resultado:\n' + str(job['result'])[-6000:])
         return '\n\n'.join(parts)
 
+    for word, target_status, verb in (
+        ('pausar', 'paused', 'Pausada'),
+        ('pause', 'paused', 'Pausada'),
+        ('cancelar', 'cancelled', 'Cancelada'),
+        ('cancele', 'cancelled', 'Cancelada'),
+        ('retomar', 'queued', 'Retomada'),
+        ('continue', 'queued', 'Retomada'),
+    ):
+        ref = _find_ref(low, word)
+        if ref:
+            job = get_job(ref)
+            if not job:
+                return 'Não encontrei essa missão.'
+            if job.get('status') == 'done' and target_status != 'cancelled':
+                return 'Essa missão já foi concluída.'
+            updated = update_job(ref, status=target_status, error='' if target_status == 'queued' else job.get('error',''))
+            audit_record('job.control', job_id=ref, action=word, status=target_status)
+            return f"{verb}: {_fmt(updated)}"
+
     if low in {'retomar jobs','retomar missões','retomar missoes','continue todas as missões','continue todas as missoes'}:
         count = recover_interrupted()
         for job in list_jobs('needs_attention', 50):
             update_job(str(job['id']), status='queued', error='')
             count += 1
+        for job in list_jobs('paused', 50):
+            update_job(str(job['id']), status='queued', error='')
+            count += 1
+        audit_record('jobs.resume_all', count=count)
         return f'Retomei {count} missão(ões). O executor continuará sozinho até concluir ou encontrar um bloqueio real.'
 
     prefixes = (
@@ -55,11 +84,12 @@ def handle(text: str) -> str | None:
             break
     if request:
         job = create_job(request)
+        audit_record('job.created', job_id=job.get('id'), request=request[:1000])
         return (
             f"Missão criada: [{job['id']}]\n"
             f"{job['title']}\n"
             "Vou planejar, executar, salvar checkpoints e retomar automaticamente após reinícios. "
-            "Você pode acompanhar com: meus jobs"
+            "Comandos: meus jobs | pausar job <id> | retomar job <id> | cancelar job <id>"
         )
 
     return None
