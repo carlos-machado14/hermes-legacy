@@ -7,7 +7,7 @@ SEARX_DIR="$HOME/.hermes/searxng"
 log(){ printf '[web-v4.1] %s\n' "$*"; }
 
 mkdir -p "$TARGET" "$SEARX_DIR"
-for file in web_search_engine.py browser_tools.py site_crawler.py site_auditor.py web_research.py web_router.py execution_planner.py execution_runtime.py core_entry.py; do
+for file in web_search_engine.py browser_tools.py site_crawler.py site_auditor.py evidence_store.py lead_scoring.py web_research.py web_router.py execution_planner.py execution_runtime.py core_entry.py; do
   cp "$ROOT/core_v2/$file" "$TARGET/$file"
 done
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
@@ -82,12 +82,12 @@ else:
     r=inspect_page('https://example.com', timeout_ms=15000)
     print('active' if r.get('ok') else 'installed-but-browser-error: '+str(r.get('error','unknown'))[:120])
 PY
-printf 'Crawler/Auditor: '
+printf 'Crawler/Auditor/Evidence/Scoring: '
 "$TARGET/venv/bin/python" - <<'PY'
-import site_crawler, site_auditor, web_research, web_router
+import site_crawler, site_auditor, evidence_store, lead_scoring, web_research, web_router
 print('active')
 PY
 printf 'Core web API: '
 curl -fsS http://127.0.0.1:8090/web/status || true; echo
 
-log "Pesquisa real + navegador + crawler + auditor instalados."
+log "Pesquisa real + navegador + crawler + auditor + evidências + lead scoring instalados."
