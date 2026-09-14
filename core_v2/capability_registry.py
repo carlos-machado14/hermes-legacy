@@ -12,6 +12,7 @@ class Capability:
     risk: str = 'low'
     requires_approval: bool = False
     async_friendly: bool = True
+    execution: str = 'local'  # local | freud
 
 
 _CAPABILITIES: dict[str, Capability] = {}
@@ -49,6 +50,13 @@ def call(name: str, args: dict[str, Any] | None = None) -> Any:
     capability = get(name)
     if capability is None:
         return {'ok': False, 'error': f'capability_not_found: {name}'}
+    if capability.execution == 'freud':
+        return {
+            'ok': False,
+            'error': 'capability_requires_freud_tool_broker',
+            'capability': asdict(capability),
+            'hint': 'Esta capacidade deve ser executada pelo Freud no contexto autenticado do usuário; credenciais nunca ficam no Hermes.',
+        }
     fn = handler(name)
     if fn is None:
         return {'ok': False, 'error': f'capability_not_bound: {name}', 'capability': asdict(capability)}
@@ -62,7 +70,7 @@ def bootstrap() -> None:
     if _CAPABILITIES:
         return
 
-    # Core/general capabilities. Bindings are intentionally lazy so modules remain optional.
+    # Capacidades locais do Core.
     register(Capability('memory.search', 'knowledge', 'Buscar memória relevante no Memory Vault'))
     register(Capability('goals.read', 'personal', 'Consultar objetivos e prioridades'))
     register(Capability('tasks.read', 'personal', 'Consultar tarefas e pendências'))
@@ -70,12 +78,23 @@ def bootstrap() -> None:
     register(Capability('web.crawl', 'research', 'Coletar conteúdo estruturado de páginas públicas'))
     register(Capability('web.audit', 'research', 'Auditar tecnicamente uma página/site'))
     register(Capability('browser.inspect', 'research', 'Renderizar e inspecionar página em navegador headless'))
-    register(Capability('github.workspace', 'developer', 'Ler e trabalhar em workspace Git local'))
+    register(Capability('github.workspace', 'developer', 'Ler e trabalhar em workspace Git local do administrador'))
     register(Capability('system.inspect', 'devops', 'Inspecionar serviços, logs e saúde do host'))
-    register(Capability('crm.read', 'business', 'Consultar leads e pipeline comercial'))
-    register(Capability('actions.queue', 'control', 'Consultar fila de ações e aprovações'))
-    register(Capability('communication.send', 'communication', 'Enviar comunicação externa por integração autorizada', risk='medium', requires_approval=True))
-    register(Capability('deploy.production', 'developer', 'Publicar alteração em ambiente de produção', risk='high', requires_approval=True))
+    register(Capability('crm.read', 'business', 'Consultar CRM local quando configurado'))
+    register(Capability('actions.queue', 'control', 'Consultar fila local de ações e aprovações'))
+
+    # Capacidades conectadas pertencem ao Control Plane Freud. O Core conhece a intenção,
+    # mas nunca recebe nem persiste as credenciais do usuário.
+    register(Capability('connected.status', 'personal', 'Consultar integrações conectadas do usuário autenticado no Freud', execution='freud'))
+    register(Capability('assistant.overview', 'personal', 'Cruzar agenda, inbox e projetos conectados para montar panorama do usuário', execution='freud'))
+    register(Capability('calendar.read', 'personal', 'Consultar Google Calendar conectado do usuário', execution='freud'))
+    register(Capability('calendar.create', 'personal', 'Criar evento no calendário conectado', risk='medium', requires_approval=True, execution='freud'))
+    register(Capability('email.read', 'communication', 'Pesquisar Gmail conectado do usuário', execution='freud'))
+    register(Capability('email.send', 'communication', 'Enviar e-mail por integração autorizada', risk='medium', requires_approval=True, execution='freud'))
+    register(Capability('github.remote.read', 'developer', 'Consultar repositórios e issues via conta GitHub conectada do usuário', execution='freud'))
+    register(Capability('github.remote.write', 'developer', 'Alterar recursos remotos do GitHub via Freud', risk='medium', requires_approval=True, execution='freud'))
+    register(Capability('whatsapp.send', 'communication', 'Enviar WhatsApp pela integração do usuário', risk='medium', requires_approval=True, execution='freud'))
+    register(Capability('deploy.production', 'developer', 'Publicar alteração em ambiente de produção', risk='high', requires_approval=True, execution='freud'))
 
 
 bootstrap()
