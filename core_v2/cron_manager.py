@@ -60,7 +60,8 @@ def run(args: list[str], timeout: int = 30) -> tuple[int, str]:
 
 def load_tasks() -> dict:
     STATE.mkdir(parents=True, exist_ok=True)
-    if not TASKS_FILE.exists(): return {}
+    if not TASKS_FILE.exists():
+        return {}
     try:
         data = json.loads(TASKS_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -78,8 +79,10 @@ def load_brief_prefs() -> dict:
     if BRIEF_PREFS.exists():
         try:
             data = json.loads(BRIEF_PREFS.read_text(encoding="utf-8"))
-            if isinstance(data, dict): defaults.update(data)
-        except Exception: pass
+            if isinstance(data, dict):
+                defaults.update(data)
+        except Exception:
+            pass
     return defaults
 
 
@@ -91,12 +94,14 @@ def save_brief_prefs(data: dict) -> None:
 
 def time_token(text: str) -> str | None:
     m = re.search(r"(?:as|at)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?", norm(text))
-    if not m: return None
+    if not m:
+        return None
     return f"{min(23, int(m.group(1))):02d}:{min(59, int(m.group(2) or 0)):02d}"
 
 
 def parse_schedule(text: str) -> str | None:
-    t = norm(text); clock = time_token(text)
+    t = norm(text)
+    clock = time_token(text)
     m = re.search(r"\ba cada\s+(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b", t)
     if m:
         suffix = "m" if "minuto" in m.group(2) else "h" if "hora" in m.group(2) else "d"
@@ -105,31 +110,61 @@ def parse_schedule(text: str) -> str | None:
     if m:
         suffix = "m" if "minuto" in m.group(2) else "h" if "hora" in m.group(2) else "d"
         return f"in {int(m.group(1))}{suffix}"
-    if any(x in t for x in ("todo dia", "todos os dias", "diariamente")) and clock: return f"every day at {clock}"
-    if any(x in t for x in ("segunda a sexta", "segunda-feira a sexta-feira", "dias uteis")) and clock: return f"weekdays at {clock}"
-    if any(x in t for x in ("fim de semana", "finais de semana")) and clock: return f"weekends at {clock}"
+    if any(x in t for x in ("todo dia", "todos os dias", "diariamente")) and clock:
+        return f"every day at {clock}"
+    if any(x in t for x in ("segunda a sexta", "segunda-feira a sexta-feira", "dias uteis")) and clock:
+        return f"weekdays at {clock}"
+    if any(x in t for x in ("fim de semana", "finais de semana")) and clock:
+        return f"weekends at {clock}"
     for pt, en in WEEKDAYS.items():
-        if re.search(rf"\b(toda|todo|cada)\s+{re.escape(norm(pt))}\b", t) and clock: return f"every {en} at {clock}"
+        if re.search(rf"\b(toda|todo|cada)\s+{re.escape(norm(pt))}\b", t) and clock:
+            return f"every {en} at {clock}"
     return None
+
+
+def _creation_intent(text: str) -> bool:
+    t = norm(text)
+    explicit = (
+        "quero uma nova rotina", "quero nova rotina", "nova rotina", "crie uma rotina",
+        "criar uma rotina", "adicione uma rotina", "adicionar uma rotina", "agende", "agendar",
+        "me lembre", "lembre-me",
+    )
+    if any(x in t for x in explicit):
+        return True
+    create_words = ("crie", "criar", "adicione", "adicionar", "agende", "agendar")
+    return any(re.search(rf"\b{re.escape(w)}\b", t) for w in create_words) and parse_schedule(text) is not None
 
 
 def extract_topic(text: str) -> tuple[str, str]:
     t = text.strip()
-    if "noticia" in norm(t):
+    low = norm(t)
+    if "noticia" in low:
         m = re.search(r"not[ií]cias?(?:\s+(?:sobre|de|do|da))?\s+(.+)", t, re.IGNORECASE)
         query = (m.group(1) if m else "tecnologia").strip(" .")
         query = re.sub(r"\s+(todo dia|todos os dias|diariamente|às?\s*\d{1,2}.*)$", "", query, flags=re.IGNORECASE).strip()
         return "news", query or "tecnologia"
-    cleaned = re.sub(r"^(crie|criar|adicione|adicionar|agende|agendar|me lembre|lembre-me)\s+", "", t, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"^(quero\s+(?:uma\s+)?nova\s+rotina|crie|criar|adicione|adicionar|agende|agendar)\s+", "", t, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(?:em\s+\d+\s+(?:minutos?|horas?|dias?)|todo dia|todos os dias|diariamente|a cada \d+ (?:minutos?|horas?|dias?))\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(?:às?|as)\s*\d{1,2}(?::\d{2})?\s*h?\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+
+    if any(x in low for x in ("me lembre", "lembrete", "lembre-me")):
+        return "reminder", cleaned or t
+
+    agent_hints = (
+        "pesquise", "pesquisar", "encontre", "encontrar", "busque", "buscar", "colete", "coletar",
+        "analise", "analisar", "empresa", "whatsapp", "site", "dados", "oportunidade", "lead",
+        "mande", "envie", "traga", "verifique", "verificar",
+    )
+    if any(x in low for x in agent_hints):
+        return "agent_task", cleaned or t
     return "reminder", cleaned or t
 
 
 def make_name(kind: str, content: str) -> str:
     stem = re.sub(r"[^a-zA-Z0-9À-ÿ ]+", "", content).strip()[:44]
-    prefix = "Notícias" if kind == "news" else "Lembrete"
+    prefix = "Notícias" if kind == "news" else "Tarefa" if kind == "agent_task" else "Lembrete"
     return f"{prefix} - {stem}" if stem else prefix
 
 
@@ -137,18 +172,37 @@ def create_job(text: str) -> str:
     schedule = parse_schedule(text)
     if not schedule:
         return "Não consegui identificar o horário/frequência. Exemplo: 'todo dia às 8h me mande notícias de Flutter'."
-    kind, content = extract_topic(text); task_id = uuid.uuid4().hex[:12]; slug = f"managed-{task_id}.sh"; name = make_name(kind, content)
-    tasks = load_tasks(); tasks[task_id] = {"type": kind, "message": content if kind == "reminder" else "", "query": content if kind == "news" else "", "schedule": schedule, "name": name, "source": "telegram-natural-language"}; save_tasks(tasks)
-    SCRIPTS.mkdir(parents=True, exist_ok=True); script = SCRIPTS / slug
-    script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + f'exec "{PYTHON}" "{RUNNER}" "{task_id}"\n', encoding="utf-8"); script.chmod(0o700)
+    kind, content = extract_topic(text)
+    task_id = uuid.uuid4().hex[:12]
+    slug = f"managed-{task_id}.sh"
+    name = make_name(kind, content)
+    tasks = load_tasks()
+    tasks[task_id] = {
+        "type": kind,
+        "message": content if kind in {"reminder", "agent_task"} else "",
+        "query": content if kind == "news" else "",
+        "schedule": schedule,
+        "name": name,
+        "source": "telegram-natural-language",
+    }
+    save_tasks(tasks)
+    SCRIPTS.mkdir(parents=True, exist_ok=True)
+    script = SCRIPTS / slug
+    script.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + f'exec "{PYTHON}" "{RUNNER}" "{task_id}"\n', encoding="utf-8")
+    script.chmod(0o700)
     code, out = run([HERMES, "cron", "create", schedule, "--no-agent", "--script", slug, "--deliver", "telegram", "--name", name])
     if code != 0:
-        tasks.pop(task_id, None); save_tasks(tasks)
-        try: script.unlink()
-        except Exception: pass
+        tasks.pop(task_id, None)
+        save_tasks(tasks)
+        try:
+            script.unlink()
+        except Exception:
+            pass
         return f"Não consegui criar a rotina. {out[-500:]}"
-    job_match = re.search(r"Created job:\s*([^\s]+)", out); job_id = job_match.group(1) if job_match else "criado"
-    return f"✅ Rotina criada\nNome: {name}\nAgenda: {schedule}\nID: {job_id}\nEntrega: Telegram\nModo: local/no-agent"
+    job_match = re.search(r"Created job:\s*([^\s]+)", out)
+    job_id = job_match.group(1) if job_match else "criado"
+    mode = "pesquisa/execução pelo Hermes Core" if kind == "agent_task" else "local/no-agent"
+    return f"✅ Rotina criada\nNome: {name}\nAgenda: {schedule}\nID: {job_id}\nEntrega: Telegram\nModo: {mode}"
 
 
 def extract_target(text: str, action_words: str) -> str:
@@ -158,16 +212,26 @@ def extract_target(text: str, action_words: str) -> str:
 
 def _looks_like_status_question(text: str) -> bool:
     t = norm(text)
-    if not any(k in t for k in ("rotina", "cron", "lembrete", "job")): return False
-    hints = ("devia", "deveria", "rodou", "executou", "executada", "executado", "nao veio", "não veio", "nao rodou", "não rodou", "cade", "cadê", "status", "horario", "horário", "que horas", "das 8", "as 8", "às 8", "das 9", "as 9", "às 9")
-    return any(k in t for k in hints) or bool(re.search(r"\b\d{1,2}(?::\d{2})?h?\b", t))
+    if _creation_intent(text):
+        return False
+    if not any(k in t for k in ("rotina", "cron", "lembrete", "job")):
+        return False
+    hints = (
+        "devia", "deveria", "rodou", "executou", "executada", "executado", "nao veio", "não veio",
+        "nao rodou", "não rodou", "cade", "cadê", "status", "horario", "horário", "que horas",
+        "das 8", "as 8", "às 8", "das 9", "as 9", "às 9",
+    )
+    return any(k in t for k in hints)
 
 
 def _status_report() -> str:
-    code, out = run([HERMES, "cron", "list", "--all"], timeout=45); managed = load_tasks(); lines = ["📋 Diagnóstico das rotinas do Hermes"]
+    code, out = run([HERMES, "cron", "list", "--all"], timeout=45)
+    managed = load_tasks()
+    lines = ["📋 Diagnóstico das rotinas do Hermes"]
     lines.extend(["", out or "Nenhuma rotina retornada pelo Hermes."] if code == 0 else ["", f"Não consegui listar as rotinas: {out[-800:]}"])
     lines.extend(["", f"Rotinas locais gerenciadas registradas: {len(managed)}"])
-    for task_id, task in list(managed.items())[:20]: lines.append(f"- {task.get('name') or task_id} | {task.get('schedule') or '-'} | id local {task_id}")
+    for task_id, task in list(managed.items())[:20]:
+        lines.append(f"- {task.get('name') or task_id} | {task.get('schedule') or '-'} | id local {task_id}")
     return "\n".join(lines)
 
 
@@ -179,21 +243,33 @@ def _looks_like_brief_update(text: str) -> bool:
 
 
 def update_brief_preferences(text: str) -> str | None:
-    if not _looks_like_brief_update(text): return None
-    t = norm(text); prefs = load_brief_prefs(); changed: list[str] = []
+    if not _looks_like_brief_update(text):
+        return None
+    t = norm(text)
+    prefs = load_brief_prefs()
+    changed: list[str] = []
     if any(k in t for k in ("resumo de cada", "resuma cada", "resumo cada", "sem precisar clicar", "sem que eu precise clicar", "sem abrir o link", "sem abrir link", "ler toda a materia", "ler toda materia")):
-        prefs["include_summary"] = True; prefs["links_are_optional"] = True; prefs["summary_chars"] = 520
+        prefs["include_summary"] = True
+        prefs["links_are_optional"] = True
+        prefs["summary_chars"] = 520
         changed.append("cada item agora vem com resumo suficiente para entender sem abrir a matéria")
     if any(k in t for k in ("sem link", "sem links", "nao quero link", "não quero link")):
-        prefs["include_links"] = False; changed.append("links ocultados")
+        prefs["include_links"] = False
+        changed.append("links ocultados")
     elif any(k in t for k in ("mantenha o link", "pode manter o link", "com link", "com links")):
-        prefs["include_links"] = True; changed.append("links mantidos apenas como fonte")
+        prefs["include_links"] = True
+        changed.append("links mantidos apenas como fonte")
     if any(k in t for k in ("mais detalhado", "mais completo", "resumo maior")):
-        prefs["summary_chars"] = 750; prefs["include_summary"] = True; changed.append("resumos ampliados")
+        prefs["summary_chars"] = 750
+        prefs["include_summary"] = True
+        changed.append("resumos ampliados")
     if any(k in t for k in ("mais curto", "mais resumido", "resumo curto")):
-        prefs["summary_chars"] = 300; prefs["include_summary"] = True; changed.append("resumos encurtados")
+        prefs["summary_chars"] = 300
+        prefs["include_summary"] = True
+        changed.append("resumos encurtados")
     if not changed:
-        prefs["include_summary"] = True; prefs["links_are_optional"] = True
+        prefs["include_summary"] = True
+        prefs["links_are_optional"] = True
         changed.append("briefings configurados para priorizar conteúdo direto no Telegram")
     save_brief_prefs(prefs)
     return "✅ Atualizei as rotinas de briefing direto pelo chat.\n- " + "\n- ".join(changed) + "\nOs horários e jobs não foram alterados. A próxima execução já usa essa configuração."
@@ -201,36 +277,52 @@ def update_brief_preferences(text: str) -> str | None:
 
 def lifecycle(text: str) -> str | None:
     brief_update = update_brief_preferences(text)
-    if brief_update is not None: return brief_update
+    if brief_update is not None:
+        return brief_update
     t = norm(text)
-    if _looks_like_status_question(text): return _status_report()
-    if any(x in t for x in ("quais rotinas", "listar rotinas", "liste as rotinas", "minhas rotinas", "listar crons")): return _status_report()
-    operations = [(("pause", "parar", "pare", "pausar"), "pause"), (("retome", "retomar", "continuar", "resume"), "resume"), (("remova", "remover", "apague", "apagar", "delete"), "remove"), (("rode", "rodar", "execute", "executar"), "run")]
+    if _looks_like_status_question(text):
+        return _status_report()
+    if any(x in t for x in ("quais rotinas", "listar rotinas", "liste as rotinas", "minhas rotinas", "listar crons")):
+        return _status_report()
+    operations = [
+        (("pause", "parar", "pare", "pausar"), "pause"),
+        (("retome", "retomar", "continuar", "resume"), "resume"),
+        (("remova", "remover", "apague", "apagar", "delete"), "remove"),
+        (("rode", "rodar", "execute", "executar"), "run"),
+    ]
     for words, command in operations:
         if any(t.startswith(w + " ") for w in words):
             target = extract_target(text, r"(?:" + "|".join(words) + r")")
-            if not target: return "Diga o nome ou ID da rotina que deseja alterar."
+            if not target:
+                return "Diga o nome ou ID da rotina que deseja alterar."
             code, out = run([HERMES, "cron", command, target])
-            if code != 0: return f"Não consegui alterar a rotina '{target}'. {out[-500:]}"
+            if code != 0:
+                return f"Não consegui alterar a rotina '{target}'. {out[-500:]}"
             labels = {"pause": "pausada", "resume": "retomada", "remove": "removida", "run": "executada"}
             return f"✅ Rotina {labels[command]}: {target}"
     return None
 
 
 def handle(text: str) -> str:
+    if _creation_intent(text) or (parse_schedule(text) is not None and any(k in norm(text) for k in ("mande", "envie", "me lembre", "noticia", "noticias"))):
+        return create_job(text)
     life = lifecycle(text)
-    if life is not None: return life
-    t = norm(text); create_words = ("crie", "criar", "adicione", "adicionar", "agende", "agendar", "me lembre", "lembre-me")
-    if any(w in t for w in create_words) or parse_schedule(text) is not None: return create_job(text)
+    if life is not None:
+        return life
     return "Não identifiquei uma ação de rotina. Posso criar, listar, atualizar conteúdo, pausar, retomar, executar ou remover rotinas."
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(); parser.add_argument("--text-b64", required=True); args = parser.parse_args()
-    try: text = base64.urlsafe_b64decode(args.text_b64.encode()).decode("utf-8")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--text-b64", required=True)
+    args = parser.parse_args()
+    try:
+        text = base64.urlsafe_b64decode(args.text_b64.encode()).decode("utf-8")
     except Exception:
-        print(RESULT_PREFIX + "Não consegui interpretar a solicitação."); return 2
-    print(RESULT_PREFIX + handle(text)); return 0
+        print(RESULT_PREFIX + "Não consegui interpretar a solicitação.")
+        return 2
+    print(RESULT_PREFIX + handle(text))
+    return 0
 
 
 if __name__ == "__main__":
