@@ -21,6 +21,9 @@ chmod +x install-core-v2.sh install-v4-runtime.sh install-web-research.sh instal
 printf '\n=== Aplicando correcoes de roteamento atual e linguagem natural ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_realtime_and_natural_cron_v2.py"
 
+printf '\n=== Aplicando confirmacao conversacional de rotinas ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_routine_confirmation_v1.py"
+
 printf '\n=== Validacoes ===\n'
 printf 'Fast Router: '; curl -fsS http://127.0.0.1:8089/health || true; echo
 printf 'Core API: '; curl -fsS http://127.0.0.1:8090/health || true; echo
