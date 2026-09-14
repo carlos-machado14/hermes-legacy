@@ -13,10 +13,10 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [x] Comandos conversacionais de missões/jobs
 - [x] Fastpath assíncrono sem timeout curto do Telegram
 
-## Fase 2 — Universal Agent Runtime ✅ base v4.3
+## Fase 2 — Universal Agent Runtime ✅ base v4.4
 - [x] Roteamento multi-domínio
 - [x] Catálogo de agentes especialistas internos
-- [x] Registry universal de capacidades
+- [x] Registry universal de capacidades locais e conectadas
 - [x] Universal Planner com Definition of Done
 - [x] Missões duráveis usando planner multi-domínio
 - [x] Contexto/memória únicos entre os domínios
@@ -41,17 +41,23 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [ ] Browser actions autenticadas via Freud
 - [ ] Pesquisa iterativa até cobertura/Definition of Done
 
-## Fase 4 — Personal Assistant OS ✅ fundação v4.3
-- [x] Panorama geral de tarefas, objetivos, projetos, missões e recursos
+## Fase 4 — Connected Personal Assistant OS ✅ base v4.4
+- [x] Panorama local de tarefas, objetivos, projetos, missões e recursos
 - [x] Detecção local do que requer atenção
 - [x] Planejamento/roteamento com especialista Personal Assistant
-- [ ] Agenda/calendário integrado via Freud
-- [ ] Inbox universal
+- [x] Catálogo de integrações conectado por usuário
+- [x] Agenda/Google Calendar via Freud
+- [x] Inbox/Gmail via Freud
+- [x] Panorama conectado `assistant_overview` (agenda + inbox + GitHub)
+- [x] Isolamento por user_id para integrações e aprovações
+- [x] GitHub remoto somente leitura via conta conectada
+- [x] Ações externas com aprovação central no Freud
 - [ ] Lembretes/contexto temporal avançado
-- [ ] Planejamento diário adaptativo com calendário real
+- [ ] Planejamento diário adaptativo com calendário real + tarefas locais
 - [ ] Preparação pré-reunião
 - [ ] Follow-up pessoal pós-reunião
 - [ ] Decisões e compromissos rastreados
+- [ ] Drive/arquivos conectados ao contexto pessoal
 
 ## Fase 5 — Business/Revenue OS
 - [ ] Goal-to-Revenue Engine
@@ -65,8 +71,8 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [ ] Daily/Weekly CEO Review
 
 ## Fase 6 — Developer OS
-- [ ] GitHub remoto via Freud como integração principal
-- [ ] Repo/branch/commit/PR via ferramentas autorizadas
+- [x] GitHub remoto via Freud para leitura e issues
+- [ ] Repo contents/branch/file commit/PR via ferramentas autorizadas
 - [ ] Build/test/review automatizados
 - [ ] Agente de programação contínua
 - [ ] Landing Factory integrada
@@ -85,8 +91,8 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [x] Finance
 - [x] Reviewer/Validator
 - [x] Seleção dinâmica de especialista por domínio
+- [x] Especialistas reconhecem capacidades remotas via Freud
 - [ ] Delegação dinâmica com execução paralela
-- [ ] Especialistas com ferramentas remotas via Freud
 
 ## Fase 8 — Memória e conhecimento
 - [ ] Embeddings locais leves
@@ -118,8 +124,9 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [ ] Conversa por voz em tempo real
 - [ ] Wake word opcional
 - [ ] App Freud como interface principal
-- [ ] Telegram/app/voz compartilhando contexto
-- [ ] Approvals Center unificado
+- [x] App Freud ↔ Hermes com tool-calling OpenAI-compatible
+- [ ] Telegram/app/voz compartilhando integrações/contexto remoto com identidade delegada segura
+- [x] Approvals Center central no Freud (base)
 
 ## Regras permanentes
 1. Hermes é uma única inteligência geral; domínios e especialistas são capacidades internas.
@@ -130,3 +137,4 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 6. Toda missão importante deve ser durável, auditável e retomável.
 7. Nenhuma etapa pode ser marcada concluída sem validação.
 8. O Hermes deve continuar sozinho até concluir ou encontrar um bloqueio real.
+9. O Core nunca recebe um token global capaz de agir como qualquer usuário; ferramentas remotas são executadas pelo Freud no contexto autenticado.
