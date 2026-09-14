@@ -78,41 +78,63 @@ def _web_reply(text: str) -> str | None:
         return None
 
 
+def _cron_status_reply(text: str) -> str | None:
+    low = text.casefold()
+    if not any(k in low for k in ('rotina', 'cron', 'lembrete', 'job')):
+        return None
+    hints = (
+        'devia', 'deveria', 'rodou', 'executou', 'executada', 'executado',
+        'não veio', 'nao veio', 'não rodou', 'nao rodou', 'cadê', 'cade',
+        'status', 'horário', 'horario', 'que horas',
+    )
+    if not any(k in low for k in hints):
+        return None
+    try:
+        from cron_manager import lifecycle
+        return lifecycle(text)
+    except Exception:
+        return None
+
+
 def ask(text: str) -> str:
     text = text.strip()
-    connected_reply = handle_connected_command(text)
-    if connected_reply is not None:
-        reply = connected_reply
+    cron_reply = _cron_status_reply(text)
+    if cron_reply is not None:
+        reply = cron_reply
     else:
-        assistant_reply = handle_assistant_command(text)
-        if assistant_reply is not None:
-            reply = assistant_reply
+        connected_reply = handle_connected_command(text)
+        if connected_reply is not None:
+            reply = connected_reply
         else:
-            universal_reply = handle_universal_command(text)
-            if universal_reply is not None:
-                reply = universal_reply
+            assistant_reply = handle_assistant_command(text)
+            if assistant_reply is not None:
+                reply = assistant_reply
             else:
-                mission_reply = handle_mission_command(text)
-                if mission_reply is not None:
-                    reply = mission_reply
+                universal_reply = handle_universal_command(text)
+                if universal_reply is not None:
+                    reply = universal_reply
                 else:
-                    web_reply = _web_reply(text)
-                    if web_reply is not None:
-                        reply = web_reply
+                    mission_reply = handle_mission_command(text)
+                    if mission_reply is not None:
+                        reply = mission_reply
                     else:
-                        developer_reply = handle_developer_command(text)
-                        if developer_reply is not None:
-                            reply = developer_reply
+                        web_reply = _web_reply(text)
+                        if web_reply is not None:
+                            reply = web_reply
                         else:
-                            memory_reply = handle_memory_command(text)
-                            if memory_reply is not None:
-                                reply = memory_reply
+                            developer_reply = handle_developer_command(text)
+                            if developer_reply is not None:
+                                reply = developer_reply
                             else:
-                                contextual = handle_contextual(text)
-                                if contextual is not None:
-                                    reply = contextual
+                                memory_reply = handle_memory_command(text)
+                                if memory_reply is not None:
+                                    reply = memory_reply
                                 else:
-                                    reply = hermes_core.ask(text)
+                                    contextual = handle_contextual(text)
+                                    if contextual is not None:
+                                        reply = contextual
+                                    else:
+                                        reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
@@ -122,7 +144,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.5 Unified Identity + Connected Assistant + Durable Missions + Web + Memory', flush=True)
+        print('Hermes Core v4.5 Independent Universal Assistant + Durable Missions + Web + Memory', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
