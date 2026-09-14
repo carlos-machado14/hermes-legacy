@@ -34,7 +34,7 @@ def _retry_small(prompt: str, system: str) -> str | None:
             system=system + (
                 '\nResponda de forma curta e conclusiva. '
                 'Se não tiver informação suficiente, diga exatamente qual dado falta. '
-                'Não diga que está trabalhando, não prometa continuar em segundo plano e não invente fatos.'
+                'Não diga que está trabalhando, não prometa continuar em segundo plano e não invente fatos, comandos ou ferramentas.'
             ),
             max_tokens=180,
         )
@@ -54,6 +54,8 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
         'Use especialistas, memória, web, browser, rotinas e ferramentas locais como capacidades internas do mesmo Hermes. '
         'Quando não souber um fato, prefira pesquisar ou consultar uma fonte/ferramenta apropriada em vez de fingir que sabe. '
+        'Nunca invente comandos slash, menus, ferramentas, integrações ou capacidades. Só mencione comandos/ferramentas que existam de verdade no contexto do Hermes. '
+        'Se o usuário pedir para alterar o comportamento do próprio Hermes e você não tiver uma ferramenta válida para executar, diga objetivamente que não conseguiu aplicar; não ofereça recursos fictícios. '
         'Nunca diga que está trabalhando em segundo plano, que vai continuar automaticamente ou que o usuário precisa esperar, a menos que exista uma missão durável real já criada e identificável. '
         'Dados financeiros estruturados locais, quando existentes, são a fonte de verdade para gastos recorrentes; atualizações explícitas do usuário devem ser persistidas pelo roteador financeiro antes do LLM. '
         'Comandos de rotina, cron e briefing devem ser executados diretamente pelo gerenciador local quando puderem ser resolvidos deterministicamente, sem transformar uma alteração simples em missão longa. '
@@ -71,6 +73,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         f"MENSAGEM ATUAL\n{prompt}\n\n"
         'Continue o assunto sem pedir novamente dados já disponíveis. Seja direto, útil e orientado a conclusão. '
         'Se faltar informação, informe objetivamente o que falta. '
+        'Não invente comandos, ferramentas ou recursos para parecer útil. '
         'Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio.'
     )
     low = prompt.lower()
@@ -85,7 +88,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         retry = _retry_small(enriched, base_system)
         if retry:
             return retry
-        return 'Não consegui obter uma resposta confiável para isso agora. Reformule de forma mais específica ou peça uma pesquisa na web.'
+        return 'Não consegui obter uma resposta confiável para isso agora.'
 
 
 hermes_core.llm = _contextual_llm
@@ -153,13 +156,6 @@ def _brief_followup_reply(text: str) -> str | None:
 
 
 def _semantic_reply(text: str) -> str | None:
-    """Camada de compreensão por intenção.
-
-    Evita depender de cadastrar todas as maneiras possíveis de dizer uma mesma
-    coisa. O classificador usa a mensagem + conversa recente e devolve intenção
-    estruturada. Se falhar ou estiver inseguro, os roteadores existentes seguem
-    normalmente.
-    """
     try:
         context = recent_conversation(limit=6, max_chars=1800)
         intent = classify_semantic_intent(text, context, _original_llm)
@@ -195,10 +191,6 @@ def _semantic_reply(text: str) -> str | None:
 
 def ask(text: str) -> str:
     text = text.strip()
-
-    # Fast paths continuam existindo para operações óbvias e baratas, mas não
-    # são mais a única forma de compreender comandos. Se eles não reconhecerem
-    # a frase, a camada semântica entende a intenção pelo significado/contexto.
     followup_reply = _brief_followup_reply(text)
     if followup_reply is not None:
         reply = followup_reply
@@ -264,7 +256,7 @@ def main() -> int:
         return 0
     except Exception as exc:
         if _is_timeout_error(exc):
-            print('Não consegui obter uma resposta confiável dentro do limite local. Tente uma pergunta mais específica ou peça pesquisa na web.', flush=True)
+            print('Não consegui obter uma resposta confiável dentro do limite local.', flush=True)
             return 0
         print(f'Não consegui concluir essa solicitação. Detalhe: {exc}', flush=True)
         return 0
