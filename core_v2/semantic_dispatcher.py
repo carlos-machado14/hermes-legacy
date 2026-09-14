@@ -39,9 +39,6 @@ def _brief_update(intent: dict[str, Any]) -> str:
         changed.append('links mantidos como fonte' if params['include_links'] else 'links ocultados')
 
     if not changed:
-        # O classificador entendeu a intenção de alterar o briefing, mas não
-        # conseguiu extrair uma preferência específica. O padrão útil é tornar
-        # o conteúdo mais autoexplicativo, sem inventar outras opções.
         prefs['include_summary'] = True
         prefs['links_are_optional'] = True
         prefs['summary_chars'] = max(int(prefs.get('summary_chars') or 520), 700)
@@ -53,6 +50,27 @@ def _brief_update(intent: dict[str, Any]) -> str:
         + '\n- '.join(changed)
         + '\nOs horários e jobs não foram alterados.'
     )
+
+
+def _target_for_action(text: str, action: str) -> str:
+    from cron_manager import extract_target
+
+    patterns = {
+        'pause': r'(?:pause|pausar|pare|parar)',
+        'resume': r'(?:retome|retomar|continue|continuar)',
+        'run': r'(?:rode|rodar|execute|executar)',
+        'remove': r'(?:remova|remover|apague|apagar|exclua|excluir)',
+    }
+    pattern = patterns.get(action)
+    if not pattern:
+        return ''
+    target = extract_target(text, pattern).strip()
+    if target.casefold() in {
+        'agora', 'já', 'ja', 'isso', 'essa', 'esse', 'ela', 'ele',
+        'a rotina', 'o job', 'a cron', 'rotina', 'job', 'cron',
+    }:
+        return ''
+    return target
 
 
 def _cron_operation(intent: dict[str, Any]) -> str | None:
@@ -76,6 +94,8 @@ def _cron_operation(intent: dict[str, Any]) -> str | None:
         'remove': ('remove', 'removida'),
     }
     if action in command_map:
+        if not target:
+            target = _target_for_action(text, action)
         if not target:
             return 'Entendi a ação na rotina, mas preciso do nome ou ID do job para executar com segurança.'
         command, label = command_map[action]
