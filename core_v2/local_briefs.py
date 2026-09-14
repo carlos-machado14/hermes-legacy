@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import sys
 from datetime import datetime
@@ -19,6 +20,7 @@ MAX_ITEMS = 6
 HOME = Path.home()
 ROOT = HOME / ".hermes" / "core-v2"
 STATE = ROOT / "state"
+BRIEF_PREFS = STATE / "brief_preferences.json"
 
 FEEDS = {
     "ai": [
@@ -44,6 +46,24 @@ def clean(text: str, limit: int = 180) -> str:
     return text
 
 
+def _brief_prefs() -> dict[str, Any]:
+    defaults = {
+        "include_summary": True,
+        "summary_chars": 420,
+        "include_links": True,
+        "links_are_optional": True,
+    }
+    if not BRIEF_PREFS.exists():
+        return defaults
+    try:
+        data = json.loads(BRIEF_PREFS.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            defaults.update(data)
+    except Exception:
+        pass
+    return defaults
+
+
 def fetch_feed(source: str, url: str) -> list[dict]:
     try:
         with httpx.Client(timeout=TIMEOUT, headers={"User-Agent": UA}, follow_redirects=True) as client:
@@ -53,11 +73,15 @@ def fetch_feed(source: str, url: str) -> list[dict]:
     except Exception as exc:
         return [{"source": source, "error": str(exc)}]
     items = []
+    prefs = _brief_prefs()
+    summary_chars = max(180, min(900, int(prefs.get("summary_chars") or 420)))
     for e in parsed.entries[:8]:
         title = clean(getattr(e, "title", ""), 170)
         link = getattr(e, "link", "") or ""
+        raw_summary = getattr(e, "summary", "") or getattr(e, "description", "") or ""
+        summary = clean(raw_summary, summary_chars)
         if title:
-            items.append({"source": source, "title": title, "link": link})
+            items.append({"source": source, "title": title, "link": link, "summary": summary})
     return items
 
 
@@ -75,6 +99,7 @@ def dedupe(items: Iterable[dict]) -> list[dict]:
 
 def render_news(kind: str, title: str, intro: str) -> str:
     collected: list[dict] = []; errors: list[str] = []
+    prefs = _brief_prefs()
     for source, url in FEEDS[kind]:
         for row in fetch_feed(source, url):
             if row.get("error"):
@@ -89,11 +114,16 @@ def render_news(kind: str, title: str, intro: str) -> str:
     else:
         for i, item in enumerate(items, 1):
             lines.append(f"{i}. {item['title']}")
-            if item.get("link"):
-                lines.append(f"   🔗 {item['link']}")
+            if prefs.get("include_summary", True):
+                summary = item.get("summary") or "Resumo não disponível no feed; use o link apenas se quiser aprofundar."
+                lines.append(f"   Resumo: {summary}")
+            if prefs.get("include_links", True) and item.get("link"):
+                lines.append(f"   Fonte: {item['link']}")
             lines.append("")
     if errors:
         lines.append(f"⚠️ Fontes temporariamente indisponíveis: {len(errors)}")
+    if prefs.get("links_are_optional", True):
+        lines.append("Você consegue entender os pontos principais sem abrir os links; eles ficam apenas como fonte para aprofundamento.")
     lines.append("Conteúdo coletado automaticamente pelo Hermes na VPS.")
     return "\n".join(lines).strip()
 
@@ -137,136 +167,78 @@ def _render_canonical_finance(now: str) -> str | None:
     if t['income']:
         lines.append(f"💰 Renda mensal informada: {_brl(t['income'])}")
         lines.append("")
-
     if groups or subscriptions:
         lines.append("💳 Assinaturas")
         for group in groups:
-            if not group.get('active', True):
-                continue
-            name = str(group.get('name') or 'Assinaturas')
-            value = _money_value(group.get('monthly_total'))
+            if not group.get('active', True): continue
+            name = str(group.get('name') or 'Assinaturas'); value = _money_value(group.get('monthly_total'))
             members = group.get('members') or []
             detail = f" — {', '.join(str(x) for x in members)}" if isinstance(members, list) and members else ""
             lines.append(f"• {name}: {_brl(value)}{detail}")
         for item in subscriptions:
-            if not item.get('active', True):
-                continue
-            name = str(item.get('name') or 'Assinatura')
-            value = _money_value(item.get('monthly_value', item.get('monthly_total')))
-            lines.append(f"• {name}: {_brl(value)}")
-        lines.append(f"Subtotal assinaturas: {_brl(t['subscriptions'])}")
-        lines.append("")
-
+            if not item.get('active', True): continue
+            lines.append(f"• {item.get('name') or 'Assinatura'}: {_brl(_money_value(item.get('monthly_value', item.get('monthly_total'))))}")
+        lines.append(f"Subtotal assinaturas: {_brl(t['subscriptions'])}"); lines.append("")
     if expenses:
         lines.append("🏠 Contas e despesas recorrentes")
         for item in expenses:
-            if not item.get('active', True):
-                continue
-            name = str(item.get('name') or 'Despesa')
-            value = _money_value(item.get('monthly_value'))
+            if not item.get('active', True): continue
             suffix = ''
-            remaining = item.get('remaining_installments')
-            if remaining not in (None, ''):
-                suffix += f" | {remaining} parcelas restantes"
-            until = item.get('until')
-            if until:
-                suffix += f" | até {until}"
-            lines.append(f"• {name}: {_brl(value)}{suffix}")
-        lines.append(f"Subtotal contas/despesas: {_brl(t['expenses'])}")
-        lines.append("")
-
+            if item.get('remaining_installments') not in (None, ''): suffix += f" | {item.get('remaining_installments')} parcelas restantes"
+            if item.get('until'): suffix += f" | até {item.get('until')}"
+            lines.append(f"• {item.get('name') or 'Despesa'}: {_brl(_money_value(item.get('monthly_value')))}{suffix}")
+        lines.append(f"Subtotal contas/despesas: {_brl(t['expenses'])}"); lines.append("")
     lines.append(f"📊 Total mensal recorrente conhecido: {_brl(t['total'])}")
     if t['income']:
         lines.append(f"Comprometimento da renda: {t['commitment_pct']:.1f}%")
         lines.append(f"Saldo após esses custos fixos: {_brl(t['free_after_fixed'])}")
-
     notes = [str(x) for x in data.get('notes', []) if str(x).strip()]
     if notes:
-        lines.append("")
-        lines.append("📝 Observações")
-        for note in notes[:8]:
-            lines.append(f"• {note}")
-    lines.append("")
-    lines.append("Fonte: base financeira local estruturada do Hermes.")
+        lines.append(""); lines.append("📝 Observações")
+        for note in notes[:8]: lines.append(f"• {note}")
+    lines.append(""); lines.append("Fonte: base financeira local estruturada do Hermes.")
     return "\n".join(lines)
 
 
 def render_finance() -> str:
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
     canonical = _render_canonical_finance(now)
-    if canonical:
-        return canonical
-
+    if canonical: return canonical
     lines = ["🇧🇷 Resumo Financeiro — Assinaturas", f"Atualizado em: {now}", ""]
-    resolved = finance_diagnostic()
-    rows = list(resolved.get("structured_rows") or [])
-    source = resolved.get("structured_source")
-
+    resolved = finance_diagnostic(); rows = list(resolved.get("structured_rows") or []); source = resolved.get("structured_source")
     if rows:
         total_by_currency: dict[str, float] = {}
         for i, row in enumerate(rows, 1):
             name = str(_row_value(row, "name", "nome", "title", "titulo", "título", "service", "servico", "serviço", default="Assinatura"))
-            raw_value = _row_value(row, "value", "valor", "amount", "price", "preco", "preço", "cost", "custo", default=0)
-            value = _money_value(raw_value)
-            currency = str(_row_value(row, "currency", "moeda", default="BRL"))
-            billing = _row_value(row, "billing", "period", "periodicidade", "ciclo", "frequency", "frequencia", "frequência", default="mensal")
+            value = _money_value(_row_value(row, "value", "valor", "amount", "price", "preco", "preço", "cost", "custo", default=0))
+            currency = str(_row_value(row, "currency", "moeda", default="BRL")); billing = _row_value(row, "billing", "period", "periodicidade", "ciclo", "frequency", "frequencia", "frequência", default="mensal")
             next_date = _row_value(row, "next_date", "nextDate", "proxima_cobranca", "próxima_cobrança", default="-")
-            active_raw = _row_value(row, "active", "ativo", default=True)
-            active = bool(active_raw) if not isinstance(active_raw, str) else active_raw.casefold() not in {"false", "0", "nao", "não", "inativa", "pausada"}
-            if active:
-                total_by_currency[currency] = total_by_currency.get(currency, 0.0) + value
-            status = "ativa" if active else "pausada"
-            lines.append(f"{i}. {name}: {currency} {value:.2f} | {billing} | próxima cobrança: {next_date} | {status}")
+            active_raw = _row_value(row, "active", "ativo", default=True); active = bool(active_raw) if not isinstance(active_raw, str) else active_raw.casefold() not in {"false", "0", "nao", "não", "inativa", "pausada"}
+            if active: total_by_currency[currency] = total_by_currency.get(currency, 0.0) + value
+            lines.append(f"{i}. {name}: {currency} {value:.2f} | {billing} | próxima cobrança: {next_date} | {'ativa' if active else 'pausada'}")
         lines.append("")
-        for currency, total in sorted(total_by_currency.items()):
-            lines.append(f"Total ativo em {currency}: {total:.2f}")
-        if source:
-            lines.append(f"Fonte local recuperada: {source}")
+        for currency, total in sorted(total_by_currency.items()): lines.append(f"Total ativo em {currency}: {total:.2f}")
+        if source: lines.append(f"Fonte local recuperada: {source}")
         return "\n".join(lines)
-
-    declared = list(resolved.get("legacy_declared_subscriptions") or [])
-    declared_source = resolved.get("legacy_declared_source")
+    declared = list(resolved.get("legacy_declared_subscriptions") or []); declared_source = resolved.get("legacy_declared_source")
     if declared:
-        lines.append("✅ Recuperei da sua sessão antiga as assinaturas que você declarou explicitamente:")
-        lines.append("")
-        for i, name in enumerate(declared, 1):
-            lines.append(f"{i}. {name} — valor ainda não recuperado")
-        lines.append("")
-        lines.append("Esses nomes vieram de uma mensagem sua, não de estimativa do Hermes.")
-        lines.append("Os valores exatos não apareceram nessa sessão; nela você escolheu simular valores estimados. Por isso não vou gravar preços inventados como se fossem seus gastos reais.")
-        if declared_source:
-            lines.append(f"Fonte recuperada: {declared_source}")
+        lines.append("✅ Recuperei da sua sessão antiga as assinaturas que você declarou explicitamente:"); lines.append("")
+        for i, name in enumerate(declared, 1): lines.append(f"{i}. {name} — valor ainda não recuperado")
+        lines.append(""); lines.append("Esses nomes vieram de uma mensagem sua, não de estimativa do Hermes.")
+        if declared_source: lines.append(f"Fonte recuperada: {declared_source}")
         return "\n".join(lines)
-
-    evidence = list(resolved.get("evidence") or [])
-    if evidence:
-        lines.append("⚠️ Encontrei trechos com assunto financeiro e valores, mas eles não estão estruturados o suficiente para assumir que são seus gastos.")
-        lines.append("")
-        for item in evidence[:8]:
-            lines.append(f"• Fonte: {item.get('path')}")
-            lines.append(f"  {item.get('snippet')}")
-        lines.append("")
-        lines.append("Não vou transformar pesquisas web, respostas do agente ou estimativas em despesas reais automaticamente.")
-        return "\n".join(lines)
-
     lines.append("⚠️ Não encontrei uma base estruturada nem uma lista explícita de assinaturas com valores reais.")
-    lines.append("O Hermes não vai inventar ou substituir gastos ausentes.")
     return "\n".join(lines)
 
 
 def main() -> int:
     kind = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
-    if kind == "ai":
-        print(render_news("ai", "Resumo Diário de Inteligência Artificial", "Principais notícias e movimentos de IA selecionados para você:"))
-    elif kind == "marketing":
-        print(render_news("marketing", "Resumo de Marketing e Leads", "Destaques sobre aquisição de clientes, marketing e vendas:"))
-    elif kind == "product":
-        print(render_news("product", "Oportunidades de Produto e Negócios", "Sinais de mercado, startups, produtos e oportunidades relevantes:"))
-    elif kind == "finance":
-        print(render_finance())
+    if kind == "ai": print(render_news("ai", "Resumo Diário de Inteligência Artificial", "Principais notícias e movimentos de IA selecionados para você:"))
+    elif kind == "marketing": print(render_news("marketing", "Resumo de Marketing e Leads", "Destaques sobre aquisição de clientes, marketing e vendas:"))
+    elif kind == "product": print(render_news("product", "Oportunidades de Produto e Negócios", "Sinais de mercado, startups, produtos e oportunidades relevantes:"))
+    elif kind == "finance": print(render_finance())
     else:
-        print("Uso: local_briefs.py ai|marketing|product|finance", file=sys.stderr)
-        return 2
+        print("Uso: local_briefs.py ai|marketing|product|finance", file=sys.stderr); return 2
     return 0
 
 
