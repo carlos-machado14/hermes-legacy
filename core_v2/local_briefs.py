@@ -115,8 +115,81 @@ def _money_value(raw_value: Any) -> float:
         return 0.0
 
 
+def _brl(value: float) -> str:
+    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _render_canonical_finance(now: str) -> str | None:
+    try:
+        from finance_manager import load, totals
+        data = load()
+    except Exception:
+        return None
+    expenses = [x for x in data.get('expenses', []) if isinstance(x, dict)]
+    groups = [x for x in data.get('subscription_groups', []) if isinstance(x, dict)]
+    income = data.get('income') if isinstance(data.get('income'), dict) else {}
+    if not expenses and not groups and not income:
+        return None
+
+    t = totals(data)
+    lines = ["🇧🇷 Resumo Financeiro — Base pessoal", f"Atualizado em: {now}", ""]
+    if t['income']:
+        lines.append(f"💰 Renda mensal informada: {_brl(t['income'])}")
+        lines.append("")
+
+    if groups:
+        lines.append("💳 Assinaturas")
+        for group in groups:
+            if not group.get('active', True):
+                continue
+            name = str(group.get('name') or 'Assinaturas')
+            value = _money_value(group.get('monthly_total'))
+            members = group.get('members') or []
+            detail = f" — {', '.join(str(x) for x in members)}" if isinstance(members, list) and members else ""
+            lines.append(f"• {name}: {_brl(value)}{detail}")
+        lines.append(f"Subtotal assinaturas: {_brl(t['subscriptions'])}")
+        lines.append("")
+
+    if expenses:
+        lines.append("🏠 Contas e despesas recorrentes")
+        for item in expenses:
+            if not item.get('active', True):
+                continue
+            name = str(item.get('name') or 'Despesa')
+            value = _money_value(item.get('monthly_value'))
+            suffix = ''
+            remaining = item.get('remaining_installments')
+            if remaining not in (None, ''):
+                suffix += f" | {remaining} parcelas restantes"
+            until = item.get('until')
+            if until:
+                suffix += f" | até {until}"
+            lines.append(f"• {name}: {_brl(value)}{suffix}")
+        lines.append(f"Subtotal contas/despesas: {_brl(t['expenses'])}")
+        lines.append("")
+
+    lines.append(f"📊 Total mensal recorrente conhecido: {_brl(t['total'])}")
+    if t['income']:
+        lines.append(f"Comprometimento da renda: {t['commitment_pct']:.1f}%")
+        lines.append(f"Saldo após esses custos fixos: {_brl(t['free_after_fixed'])}")
+
+    notes = [str(x) for x in data.get('notes', []) if str(x).strip()]
+    if notes:
+        lines.append("")
+        lines.append("📝 Observações")
+        for note in notes[:8]:
+            lines.append(f"• {note}")
+    lines.append("")
+    lines.append("Fonte: base financeira local estruturada do Hermes.")
+    return "\n".join(lines)
+
+
 def render_finance() -> str:
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
+    canonical = _render_canonical_finance(now)
+    if canonical:
+        return canonical
+
     lines = ["🇧🇷 Resumo Financeiro — Assinaturas", f"Atualizado em: {now}", ""]
     resolved = finance_diagnostic()
     rows = list(resolved.get("structured_rows") or [])
