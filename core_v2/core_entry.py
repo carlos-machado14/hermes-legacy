@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import re
 import sys
 
 import hermes_core
@@ -21,10 +22,38 @@ from semantic_dispatcher import dispatch as dispatch_semantic_intent
 
 _original_llm = hermes_core.llm
 
+_EXACT_REPLY_RE = re.compile(r'^\s*(?:responda|responde)\s+(?:apenas|somente)\s*:', re.IGNORECASE)
+_FOLLOWUP_HINTS = (
+    'isso', 'essa', 'esse', 'esta', 'este', 'aquilo', 'ela', 'ele', 'dessa', 'desse',
+    'continue', 'continua', 'continuar', 'pode seguir', 'pode continuar', 'e agora', 'e depois',
+    'mais detalhes', 'mais detalhe', 'explique melhor', 'melhore isso', 'faça isso', 'faca isso',
+)
+_PERSONAL_HINTS = (
+    'meu ', 'minha ', 'meus ', 'minhas ', 'sobre mim', 'de mim', 'para mim', 'pra mim',
+    'meu perfil', 'meus dados', 'minha memória', 'minha memoria', 'lembra de', 'lembre de',
+    'meu objetivo', 'meus objetivos', 'minha tarefa', 'minhas tarefas', 'meu projeto', 'meus projetos',
+    'minha rotina', 'minhas rotinas', 'meus gastos', 'minhas despesas', 'minhas finanças', 'minhas financas',
+    'o que você sabe sobre mim', 'o que voce sabe sobre mim',
+)
+
 
 def _is_timeout_error(exc: Exception) -> bool:
     text = str(exc).casefold()
     return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout'))
+
+
+def _needs_recent_context(prompt: str) -> bool:
+    low = prompt.casefold().strip()
+    if not low or len(low) > 220:
+        return False
+    if low in {'sim', 'não', 'nao', 'ok', 'pode', 'pode fazer', 'continue', 'continua'}:
+        return True
+    return any(hint in low for hint in _FOLLOWUP_HINTS)
+
+
+def _needs_personal_context(prompt: str) -> bool:
+    low = prompt.casefold()
+    return any(hint in low for hint in _PERSONAL_HINTS)
 
 
 def _retry_small(prompt: str, system: str) -> str | None:
@@ -43,43 +72,63 @@ def _retry_small(prompt: str, system: str) -> str | None:
 
 
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    context = compact_context(max_items=3)
-    recent = recent_conversation(limit=4, max_chars=1600)
-    sync_state_snapshots()
-    long_term = retrieve_memory(prompt, limit=3, max_chars=1400)
+    low = prompt.casefold().strip()
+
+    # Smoke tests e pedidos de resposta literal não precisam carregar memória,
+    # roteamento, objetivos ou conversa anterior. Isto também serve como caminho
+    # ultrarrápido para confirmações simples usadas pelo gateway/health checks.
+    if _EXACT_REPLY_RE.match(prompt):
+        exact_system = (
+            'Você é Hermes. Obedeça literalmente ao pedido atual. '
+            'Quando o usuário pedir para responder apenas/somente algo, devolva somente o conteúdo solicitado, sem explicações.'
+        )
+        if system:
+            exact_system += '\n' + system
+        return _original_llm(prompt, system=exact_system, max_tokens=max_tokens or 48)
+
+    use_recent = _needs_recent_context(prompt)
+    use_personal = _needs_personal_context(prompt)
     route = classify_domain(prompt)
+
+    # O modelo local é rápido com prompts pequenos, mas um prompt contextual de
+    # milhares de tokens aumenta a latência para dezenas de segundos. Carregamos
+    # memória/contexto somente quando a mensagem realmente depende deles.
+    context = ''
+    recent = ''
+    long_term = ''
+    if use_personal:
+        context = compact_context(max_items=2)
+        sync_state_snapshots()
+        long_term = retrieve_memory(prompt, limit=2, max_chars=650)
+    if use_recent:
+        recent = recent_conversation(limit=3, max_chars=700)
+
     base_system = (
-        'Você é Hermes, uma única inteligência artificial pessoal e geral. '
-        'Você não é um agente de leads: negócios é apenas um dos seus domínios. '
-        'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
-        'Use especialistas, memória, web, browser, rotinas e ferramentas locais como capacidades internas do mesmo Hermes. '
-        'Quando não souber um fato, prefira pesquisar ou consultar uma fonte/ferramenta apropriada em vez de fingir que sabe. '
-        'Nunca invente comandos slash, menus, ferramentas, integrações ou capacidades. Só mencione comandos/ferramentas que existam de verdade no contexto do Hermes. '
-        'Se o usuário pedir para alterar o comportamento do próprio Hermes e você não tiver uma ferramenta válida para executar, diga objetivamente que não conseguiu aplicar; não ofereça recursos fictícios. '
-        'Nunca diga que está trabalhando em segundo plano, que vai continuar automaticamente ou que o usuário precisa esperar, a menos que exista uma missão durável real já criada e identificável. '
-        'Dados financeiros estruturados locais, quando existentes, são a fonte de verdade para gastos recorrentes; atualizações explícitas do usuário devem ser persistidas pelo roteador financeiro antes do LLM. '
-        'Comandos de rotina, cron e briefing devem ser executados diretamente pelo gerenciador local quando puderem ser resolvidos deterministicamente, sem transformar uma alteração simples em missão longa. '
-        'Quando houver identidade delegada, ferramentas conectadas como agenda, e-mail, GitHub e comunicação são executadas pelo Freud no contexto autenticado do usuário. '
-        'Credenciais de usuário nunca pertencem ao Hermes e nunca devem ser solicitadas pelo modelo quando o Freud puder fornecer uma integração. '
-        'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
+        'Você é Hermes, uma inteligência artificial pessoal e geral. Responda em português do Brasil. '
+        'Seja direto, útil e conclua a resposta. Use somente capacidades e ferramentas que realmente existam. '
+        'Não invente comandos, integrações, resultados ou ações executadas. '
+        'Quando faltar informação, diga objetivamente o que falta. '
+        'Ações externas ou sensíveis exigem evidência e aprovação quando aplicável.'
     )
     if system:
         base_system += '\n' + system
-    enriched = (
-        f"ROTEAMENTO\nDomínio principal: {route['primary_domain']} | agente: {route['agent']} | secundários: {', '.join(route['secondary_domains']) or 'nenhum'}\n\n"
-        f"{context}\n\n"
-        f"CONVERSA RECENTE\n{recent}\n\n"
-        f"MEMÓRIA RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
-        f"MENSAGEM ATUAL\n{prompt}\n\n"
-        'Continue o assunto sem pedir novamente dados já disponíveis. Seja direto, útil e orientado a conclusão. '
-        'Se faltar informação, informe objetivamente o que falta. '
-        'Não invente comandos, ferramentas ou recursos para parecer útil. '
-        'Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio.'
-    )
-    low = prompt.lower()
+
+    sections = [
+        f"ROTA: {route['primary_domain']} / {route['agent']}",
+    ]
+    if context:
+        sections.append(context)
+    if recent:
+        sections.append('CONVERSA RECENTE\n' + recent)
+    if long_term:
+        sections.append('MEMÓRIA RELEVANTE\n' + long_term)
+    sections.append('MENSAGEM ATUAL\n' + prompt)
+    sections.append('Responda ao pedido atual sem repetir contexto desnecessário e sem terminar no meio de uma frase.')
+    enriched = '\n\n'.join(sections)
+
     requested = max_tokens
     if requested is None:
-        requested = 520 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 320
+        requested = 480 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 240
     try:
         return _original_llm(enriched, system=base_system, max_tokens=requested)
     except Exception as exc:
@@ -249,7 +298,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.6 Semantic Intent Router + Independent Universal Assistant', flush=True)
+        print('Hermes Core v4.7 Selective Context + Semantic Intent Router', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
