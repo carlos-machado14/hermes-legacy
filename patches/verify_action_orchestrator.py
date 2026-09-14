@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 from pathlib import Path
 
@@ -43,19 +42,20 @@ def main() -> int:
     if compile_check.returncode != 0:
         fail((compile_check.stderr or compile_check.stdout or 'py_compile falhou')[-1800:])
 
-    spec = importlib.util.spec_from_file_location('action_orchestrator_verify', ORCH)
-    if spec is None or spec.loader is None:
-        fail('não consegui importar action_orchestrator')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    read_plan = module._plan('Pesquise uma empresa em Colombo PR que não tenha site')
-    if read_plan is None or read_plan.tool != 'web' or read_plan.requires_confirmation:
-        fail('pesquisa pontual não foi classificada como leitura web sem confirmação')
-
-    mutation_plan = module._plan('reinicie o gateway')
-    if mutation_plan is None or mutation_plan.tool != 'service_restart' or not mutation_plan.requires_confirmation:
-        fail('ação mutável não exige confirmação')
+    probe = subprocess.run(
+        [str(PY), '-c', (
+            "from action_orchestrator import _plan, policy; "
+            "r=_plan('Pesquise uma empresa em Colombo PR que não tenha site'); "
+            "m=_plan('reinicie o gateway'); "
+            "assert r and r.tool=='web' and not r.requires_confirmation; "
+            "assert m and m.tool=='service_restart' and m.requires_confirmation; "
+            "assert policy().get('confirm_mutations') is True; "
+            "print('probe-ok')"
+        )],
+        cwd=str(ROOT), text=True, capture_output=True, timeout=20,
+    )
+    if probe.returncode != 0 or 'probe-ok' not in (probe.stdout or ''):
+        fail((probe.stderr or probe.stdout or 'probe do Action Orchestrator falhou')[-1800:])
 
     print('OK: Action Orchestrator validado')
     print('OK: contexto por chat + confirmação + executor + validação + journal + retry seguros ativos')
