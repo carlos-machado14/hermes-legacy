@@ -3,3 +3,4 @@ PyYAML==6.0.2
 psutil==7.0.0
 feedparser==6.0.11
 beautifulsoup4==4.13.4
+playwright==1.55.0
