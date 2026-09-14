@@ -11,7 +11,6 @@ from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from developer_router import handle as handle_developer_command
 from mission_router import handle as handle_mission_command
-from web_router import handle as handle_web_command
 
 _original_llm = hermes_core.llm
 
@@ -53,13 +52,21 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
 hermes_core.llm = _contextual_llm
 
 
+def _web_reply(text: str) -> str | None:
+    try:
+        from web_router import handle
+        return handle(text)
+    except ImportError:
+        return None
+
+
 def ask(text: str) -> str:
     text = text.strip()
     mission_reply = handle_mission_command(text)
     if mission_reply is not None:
         reply = mission_reply
     else:
-        web_reply = handle_web_command(text)
+        web_reply = _web_reply(text)
         if web_reply is not None:
             reply = web_reply
         else:
@@ -92,11 +99,7 @@ def main() -> int:
         return 0
     except Exception as exc:
         if _is_timeout_error(exc):
-            print(
-                'Demorei mais do que deveria para responder, mas mantive o contexto. '
-                'Sua mensagem não foi perdida.',
-                flush=True,
-            )
+            print('Demorei mais do que deveria para responder, mas mantive o contexto. Sua mensagem não foi perdida.', flush=True)
             return 0
         print(f'Não consegui concluir essa resposta agora, mas o contexto foi preservado. Detalhe: {exc}', flush=True)
         return 0
