@@ -1,6 +1,6 @@
 # Hermes v4 — Autonomous Execution Runtime
 
-Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber missões, planejar, executar, validar, retomar após falhas e operar ferramentas reais com memória, segurança e aprovação.
+Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de conversar, lembrar, receber missões, planejar, executar, validar, retomar após falhas e operar ferramentas reais com memória, segurança e aprovação. Leads/CRM são apenas uma capacidade entre muitas.
 
 ## Fase 1 — Fundação durável ✅
 - [x] Job Store SQLite
@@ -13,29 +13,44 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [x] Comandos conversacionais de missões/jobs
 - [x] Fastpath assíncrono sem timeout curto do Telegram
 
-## Fase 2 — Runtime autônomo avançado
-- [ ] Loop até Definition of Done
-- [ ] Cancelar/pausar/retomar jobs
+## Fase 2 — Universal Agent Runtime ✅ base v4.2
+- [x] Roteamento multi-domínio
+- [x] Catálogo de agentes especialistas internos
+- [x] Registry universal de capacidades
+- [x] Universal Planner com Definition of Done
+- [x] Missões duráveis usando planner multi-domínio
+- [x] Contexto/memória únicos entre os domínios
+- [x] Política explícita para ações externas/sensíveis
+- [ ] Pausar/cancelar/retomar jobs individualmente
 - [ ] Prioridade e dependências entre jobs
 - [ ] Execução paralela controlada
 - [ ] Resource manager por CPU/RAM
 - [ ] Deadline e orçamento por missão
-- [ ] Checkpoints ricos com artefatos
-- [ ] Retry adaptativo e backoff
 - [ ] Dead-letter queue
 - [ ] Auditoria completa de decisões e ações
 
-## Fase 3 — Web & Research
-- [ ] SearXNG self-hosted
-- [ ] Playwright/browser worker
-- [ ] Crawler de empresas
-- [ ] Extração estruturada de contatos/dados
-- [ ] Auditoria automática de sites
-- [ ] Deep research multi-fonte
-- [ ] Evidências e rastreabilidade das fontes
-- [ ] Lead scoring automático
+## Fase 3 — Web & Research ✅ fundação v4.1
+- [x] SearXNG self-hosted
+- [x] Playwright/browser worker
+- [x] Crawler web
+- [x] Extração estruturada de contatos/dados
+- [x] Auditoria automática de sites
+- [x] Deep research multi-fonte base
+- [x] Evidências e rastreabilidade base
+- [x] Lead scoring como capacidade opcional
+- [ ] Browser actions autenticadas via Freud
+- [ ] Pesquisa iterativa até cobertura/Definition of Done
 
-## Fase 4 — Business/Revenue OS
+## Fase 4 — Personal Assistant OS
+- [ ] Agenda/calendário integrado
+- [ ] Inbox universal
+- [ ] Lembretes/contexto temporal
+- [ ] Planejamento diário adaptativo
+- [ ] Preparação pré-reunião
+- [ ] Follow-up pessoal pós-reunião
+- [ ] Decisões e compromissos rastreados
+
+## Fase 5 — Business/Revenue OS
 - [ ] Goal-to-Revenue Engine
 - [ ] Pipeline comercial automático
 - [ ] Enriquecimento de leads
@@ -46,7 +61,7 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [ ] Opportunity Radar contínuo
 - [ ] Daily/Weekly CEO Review
 
-## Fase 5 — Developer OS
+## Fase 6 — Developer OS
 - [ ] GitHub remoto via Freud como integração principal
 - [ ] Repo/branch/commit/PR via ferramentas autorizadas
 - [ ] Build/test/review automatizados
@@ -56,17 +71,20 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [ ] Rollback automático
 - [ ] GitHub watcher/CI repair
 
-## Fase 6 — Multiagentes
-- [ ] Researcher
-- [ ] Developer
-- [ ] Sales
-- [ ] Marketing
-- [ ] DevOps
-- [ ] Finance
-- [ ] Reviewer/Validator
-- [ ] Orquestrador com delegação dinâmica
+## Fase 7 — Especialistas e orquestração
+- [x] General Assistant
+- [x] Researcher
+- [x] Developer
+- [x] DevOps
+- [x] Business
+- [x] Personal Assistant
+- [x] Communication
+- [x] Finance
+- [x] Reviewer/Validator
+- [ ] Delegação dinâmica com execução paralela
+- [ ] Especialistas com ferramentas remotas via Freud
 
-## Fase 7 — Memória e conhecimento
+## Fase 8 — Memória e conhecimento
 - [ ] Embeddings locais leves
 - [ ] RAG por projeto
 - [ ] Knowledge graph
@@ -74,7 +92,7 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [ ] Aprendizado por resultado real
 - [ ] Memória multiusuário via Freud
 
-## Fase 8 — Observabilidade & Self-Healing
+## Fase 9 — Observabilidade & Self-Healing
 - [ ] Mission Control
 - [ ] Timeline de atividades
 - [ ] Métricas de jobs e ferramentas
@@ -83,14 +101,14 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [ ] Auto-update com smoke test/rollback
 - [ ] Self-debugger
 
-## Fase 9 — Skills
+## Fase 10 — Skills
 - [ ] Manifesto padrão de skills
 - [ ] Permissões por skill
 - [ ] Skill registry persistente
 - [ ] Skill Store privada
 - [ ] Skill Generator com testes e aprovação
 
-## Fase 10 — Voz e interfaces
+## Fase 11 — Voz e interfaces
 - [ ] STT local
 - [ ] TTS local
 - [ ] Conversa por voz em tempo real
@@ -100,10 +118,11 @@ Objetivo: transformar o Hermes em uma inteligência local-first capaz de receber
 - [ ] Approvals Center unificado
 
 ## Regras permanentes
-1. Ações internas seguras podem ser autônomas.
-2. Ações externas/sensíveis respeitam política de aprovação.
-3. Credenciais do usuário ficam no Freud/banco criptografado, não no código nem no modelo.
-4. Estado pessoal fica fora do Git.
-5. Toda missão importante deve ser durável, auditável e retomável.
-6. Nenhuma etapa pode ser marcada concluída sem validação.
-7. O Hermes deve continuar sozinho até concluir ou encontrar um bloqueio real.
+1. Hermes é uma única inteligência geral; domínios e especialistas são capacidades internas.
+2. Ações internas seguras podem ser autônomas.
+3. Ações externas/sensíveis respeitam política de aprovação.
+4. Credenciais do usuário ficam no Freud/banco criptografado, não no código nem no modelo.
+5. Estado pessoal fica fora do Git.
+6. Toda missão importante deve ser durável, auditável e retomável.
+7. Nenhuma etapa pode ser marcada concluída sem validação.
+8. O Hermes deve continuar sozinho até concluir ou encontrar um bloqueio real.
