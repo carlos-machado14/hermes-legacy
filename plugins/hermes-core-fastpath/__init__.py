@@ -10,6 +10,8 @@ import re
 import subprocess
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +33,66 @@ CONTINUE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_JOB_QUEUE: queue.Queue[tuple[Any, Any, str, bool]] = queue.Queue(maxsize=100)
+CANCEL_RE = re.compile(
+    r"^(?:pare|para|cancele|cancelar|cancela|interrompa|interromper|"
+    r"esquece isso|esqueça isso|deixa pra l[aá]|deixe pra l[aá]|para isso|pare isso)[.! ]*$",
+    re.IGNORECASE,
+)
+
+REPLACE_RE = re.compile(
+    r"^(?:esquece isso|esqueça isso|cancela isso|cancele isso|deixa isso|deixe isso)"
+    r"(?:\s+e\s+|\s*,\s*)(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_HARD_HINTS = (
+    'analise profundamente', 'análise profunda', 'detalhadamente', 'passo a passo',
+    'arquitetura', 'refatore', 'refatorar', 'investigue', 'diagnostique',
+    'pesquisa completa', 'pesquise profundamente', 'causa raiz', 'root cause',
+    'revise o projeto', 'implemente completo', 'implemente completa',
+)
+
+_MISSION_HINTS = (
+    'missão:', 'missao:', 'execute até finalizar', 'execute ate finalizar',
+    'trabalhe até concluir', 'trabalhe ate concluir', 'faça até finalizar',
+    'faca ate finalizar',
+)
+
+_TIMEOUTS = {
+    'fast': 15,
+    'normal': 45,
+    'hard': 120,
+    'mission': 300,
+    'cron': 120,
+}
+
+
+@dataclass
+class Job:
+    gateway: Any
+    source: Any
+    text: str
+    is_cron: bool
+    loop: asyncio.AbstractEventLoop
+    trace_id: str
+    tier: str
+    generation: int
+    enqueued_at: float
+
+
+_JOB_QUEUE: queue.Queue[Job] = queue.Queue(maxsize=100)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _ACTIVE_CHATS: set[str] = set()
 _ACTIVE_LOCK = threading.Lock()
+_ACTIVE_PROCS: dict[str, subprocess.Popen[str]] = {}
+_PROC_LOCK = threading.Lock()
+_CHAT_GENERATION: dict[str, int] = {}
+_GENERATION_LOCK = threading.Lock()
+
+
+def _trace_id() -> str:
+    return uuid.uuid4().hex[:12]
 
 
 def _chat_key(source: Any) -> str:
@@ -61,6 +118,44 @@ def _is_active(source: Any) -> bool:
         return False
     with _ACTIVE_LOCK:
         return key in _ACTIVE_CHATS
+
+
+def _generation(key: str) -> int:
+    with _GENERATION_LOCK:
+        return int(_CHAT_GENERATION.get(key, 0))
+
+
+def _invalidate_chat(key: str) -> int:
+    with _GENERATION_LOCK:
+        value = int(_CHAT_GENERATION.get(key, 0)) + 1
+        _CHAT_GENERATION[key] = value
+        return value
+
+
+def _is_stale(key: str, generation: int) -> bool:
+    return _generation(key) != generation
+
+
+def _classify_complexity(text: str, is_cron: bool = False) -> str:
+    if is_cron:
+        return 'cron'
+    low = str(text or '').casefold().strip()
+    if not low:
+        return 'fast'
+    if re.match(r'^\s*(?:responda|responde)\s+(?:apenas|somente)\s*:', low):
+        return 'fast'
+    if any(low.startswith(h) for h in _MISSION_HINTS):
+        return 'mission'
+    score = 0
+    words = len(re.findall(r'\S+', low))
+    if words >= 110 or len(low) >= 750:
+        score += 2
+    elif words >= 65 or len(low) >= 420:
+        score += 1
+    score += sum(1 for hint in _HARD_HINTS if hint in low)
+    if re.search(r'\b(?:analise|compare|investigue|diagnostique|planeje|implemente|refatore)\b', low):
+        score += 1
+    return 'hard' if score >= 2 else 'normal'
 
 
 def _env_value(name: str) -> str:
@@ -161,35 +256,120 @@ def _remember_channel(source: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {'platform': platform, 'chat_id': chat_id, 'user_id': user_id, 'updated_at': int(time.time())}
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        logger.info("fastpath remembered proactive channel platform=%s chat=%s", platform, chat_id)
     except Exception as exc:
         logger.warning("fastpath could not remember proactive channel: %s", exc)
 
 
-def _run_core(text: str) -> str:
+def _register_proc(key: str, proc: subprocess.Popen[str] | None) -> None:
+    if not key:
+        return
+    with _PROC_LOCK:
+        if proc is None:
+            _ACTIVE_PROCS.pop(key, None)
+        else:
+            _ACTIVE_PROCS[key] = proc
+
+
+def _cancel_chat(source: Any, trace: str) -> bool:
+    key = _chat_key(source)
+    if not key:
+        return False
+    _invalidate_chat(key)
+    proc: subprocess.Popen[str] | None = None
+    with _PROC_LOCK:
+        proc = _ACTIVE_PROCS.get(key)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            logger.info("fastpath trace=%s cancel terminate chat=%s pid=%s", trace, key, proc.pid)
+            return True
+        except Exception as exc:
+            logger.warning("fastpath trace=%s cancel failed chat=%s error=%s", trace, key, exc)
+    logger.info("fastpath trace=%s cancel invalidated queued work chat=%s", trace, key)
+    return False
+
+
+def _run_process(
+    args: list[str],
+    *,
+    cwd: str,
+    timeout: int,
+    key: str,
+    trace: str,
+    tier: str,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env['HERMES_TRACE_ID'] = trace
+    if tier != 'cron':
+        env['HERMES_COMPLEXITY'] = tier
+
+    proc = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _register_proc(key, proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=2)
+        except Exception:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+    finally:
+        _register_proc(key, None)
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
+
+
+def _run_core(text: str, *, key: str, trace: str, tier: str) -> str:
     root = Path.home() / '.hermes' / 'core-v2'
     py = root / 'venv' / 'bin' / 'python'
     core = root / 'core_entry.py'
-    logger.info("fastpath -> conversational core text=%r", text[:180])
-    proc = subprocess.run(
-        [str(py), str(core), text], text=True, capture_output=True,
-        timeout=300, cwd=str(root),
+    timeout = int(_TIMEOUTS.get(tier, 45))
+    started = time.perf_counter()
+    proc = _run_process(
+        [str(py), str(core), text],
+        cwd=str(root),
+        timeout=timeout,
+        key=key,
+        trace=trace,
+        tier=tier,
     )
-    logger.info("fastpath core rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''))
+    elapsed = (time.perf_counter() - started) * 1000
+    logger.info(
+        "fastpath trace=%s stage=core tier=%s elapsed_ms=%.2f rc=%s stdout_len=%s stderr_len=%s",
+        trace, tier, elapsed, proc.returncode, len(proc.stdout or ''), len(proc.stderr or ''),
+    )
     if proc.returncode != 0:
         return f"⚠️ Não consegui concluir essa resposta. Detalhe: {(proc.stderr or proc.stdout)[-500:].strip()}"
     return (proc.stdout or '').strip() or 'Não encontrei uma resposta confiável para isso ainda.'
 
 
-def _run_cron(text: str) -> str:
+def _run_cron(text: str, *, key: str, trace: str) -> str:
     root = Path.home() / '.hermes' / 'core-v2'
     py = root / 'venv' / 'bin' / 'python'
     manager = root / 'cron_manager.py'
     encoded = base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii')
-    logger.info("fastpath -> cron text=%r", text[:180])
-    proc = subprocess.run([str(py), str(manager), '--text-b64', encoded], text=True, capture_output=True, timeout=120, cwd=str(root))
+    started = time.perf_counter()
+    proc = _run_process(
+        [str(py), str(manager), '--text-b64', encoded],
+        cwd=str(root),
+        timeout=_TIMEOUTS['cron'],
+        key=key,
+        trace=trace,
+        tier='cron',
+    )
     raw = (proc.stdout or '').strip()
-    logger.info("fastpath cron rc=%s stdout_len=%s stderr_len=%s", proc.returncode, len(raw), len(proc.stderr or ''))
+    logger.info(
+        "fastpath trace=%s stage=cron elapsed_ms=%.2f rc=%s stdout_len=%s stderr_len=%s",
+        trace, (time.perf_counter() - started) * 1000, proc.returncode, len(raw), len(proc.stderr or ''),
+    )
     if proc.returncode != 0:
         return f"⚠️ Não consegui concluir essa rotina agora. Detalhe: {(proc.stderr or raw)[-500:].strip()}"
     marker = 'HERMES_CRON_RESULT:'
@@ -227,53 +407,107 @@ def _split_message(text: str, limit: int = 3600) -> list[str]:
     return [f"[{i}/{total}]\n{chunk}" for i, chunk in enumerate(chunks, 1)]
 
 
-async def _send_all(adapter: Any, chat_id: Any, chunks: list[str]) -> None:
+async def _send_all(adapter: Any, chat_id: Any, chunks: list[str], trace: str) -> None:
+    started = time.perf_counter()
     for index, chunk in enumerate(chunks, 1):
         await adapter.send(chat_id, chunk)
-        logger.info("fastpath reply chunk sent chat=%s part=%s/%s chars=%s", chat_id, index, len(chunks), len(chunk))
+        logger.info(
+            "fastpath trace=%s stage=send_chunk chat=%s part=%s/%s chars=%s",
+            trace, chat_id, index, len(chunks), len(chunk),
+        )
         if index < len(chunks):
             await asyncio.sleep(0.15)
+    logger.info(
+        "fastpath trace=%s stage=send_total chat=%s elapsed_ms=%.2f chunks=%s",
+        trace, chat_id, (time.perf_counter() - started) * 1000, len(chunks),
+    )
 
 
-def _schedule_send(gateway: Any, source: Any, text: str) -> None:
-    try:
-        adapter = gateway._adapter_for_source(source)
-        if adapter is None:
-            logger.error("fastpath send failed: adapter ausente")
-            return
-        chunks = _split_message(text)
-        coro = _send_all(adapter, source.chat_id, chunks)
+def _schedule_send(
+    loop: asyncio.AbstractEventLoop,
+    gateway: Any,
+    source: Any,
+    text: str,
+    trace: str,
+) -> None:
+    if loop.is_closed():
+        logger.error("fastpath trace=%s send skipped: gateway event loop is closed", trace)
+        return
+
+    chunks = _split_message(text)
+
+    def submit() -> None:
         try:
-            asyncio.get_running_loop().create_task(coro)
-            logger.info("fastpath reply scheduled chat=%s chunks=%s chars=%s", source.chat_id, len(chunks), len(text))
-        except RuntimeError:
-            asyncio.run(coro)
-            logger.info("fastpath reply sent with asyncio.run chat=%s chunks=%s chars=%s", source.chat_id, len(chunks), len(text))
-    except Exception as exc:
-        logger.exception("fastpath send failed: %s", exc)
+            adapter = gateway._adapter_for_source(source)
+            if adapter is None:
+                logger.error("fastpath trace=%s send failed: adapter ausente", trace)
+                return
+            task = loop.create_task(_send_all(adapter, source.chat_id, chunks, trace))
+
+            def done_callback(done: asyncio.Task) -> None:
+                try:
+                    done.result()
+                except Exception as exc:
+                    logger.exception("fastpath trace=%s send task failed: %s", trace, exc)
+
+            task.add_done_callback(done_callback)
+            logger.info(
+                "fastpath trace=%s reply scheduled on gateway_loop chat=%s chunks=%s chars=%s",
+                trace, source.chat_id, len(chunks), len(text),
+            )
+        except Exception as exc:
+            logger.exception("fastpath trace=%s send scheduling failed: %s", trace, exc)
+
+    loop.call_soon_threadsafe(submit)
 
 
-def _process_job(gateway: Any, source: Any, text: str, is_cron: bool) -> None:
-    _set_active(source, True)
+def _process_job(job: Job) -> None:
+    key = _chat_key(job.source)
+    if _is_stale(key, job.generation):
+        logger.info("fastpath trace=%s skipped stale queued job chat=%s", job.trace_id, key)
+        return
+
+    queue_ms = (time.perf_counter() - job.enqueued_at) * 1000
+    logger.info(
+        "fastpath trace=%s stage=dequeue tier=%s queue_ms=%.2f chat=%s",
+        job.trace_id, job.tier, queue_ms, key,
+    )
+
+    _set_active(job.source, True)
+    started = time.perf_counter()
     try:
-        reply = _run_cron(text) if is_cron else _run_core(text)
+        reply = (
+            _run_cron(job.text, key=key, trace=job.trace_id)
+            if job.is_cron
+            else _run_core(job.text, key=key, trace=job.trace_id, tier=job.tier)
+        )
     except subprocess.TimeoutExpired:
-        logger.exception("fastpath local execution reached hard safety limit")
-        reply = 'Não consegui concluir essa solicitação dentro do limite local. Tente reformular ou peça uma pesquisa específica.'
+        logger.exception("fastpath trace=%s local execution timeout tier=%s", job.trace_id, job.tier)
+        reply = 'Essa solicitação excedeu o limite de tempo desta rota. Tente simplificar ou transforme em uma missão longa.'
     except Exception as exc:
-        logger.exception("fastpath local execution failed: %s", exc)
+        logger.exception("fastpath trace=%s local execution failed: %s", job.trace_id, exc)
         reply = f'Não consegui concluir essa solicitação agora. Detalhe: {exc}'
     finally:
-        _set_active(source, False)
-    _schedule_send(gateway, source, reply)
+        _set_active(job.source, False)
+
+    if _is_stale(key, job.generation):
+        logger.info("fastpath trace=%s suppressing stale/cancelled reply chat=%s", job.trace_id, key)
+        return
+
+    total_ms = (time.perf_counter() - job.enqueued_at) * 1000
+    logger.info(
+        "fastpath trace=%s stage=ready total_ms=%.2f exec_ms=%.2f tier=%s reply_chars=%s",
+        job.trace_id, total_ms, (time.perf_counter() - started) * 1000, job.tier, len(reply),
+    )
+    _schedule_send(job.loop, job.gateway, job.source, reply, job.trace_id)
 
 
 def _worker() -> None:
     logger.warning("HERMES CORE FASTPATH background worker started")
     while True:
-        gateway, source, text, is_cron = _JOB_QUEUE.get()
+        job = _JOB_QUEUE.get()
         try:
-            _process_job(gateway, source, text, is_cron)
+            _process_job(job)
         except Exception:
             logger.exception("fastpath background job crashed")
         finally:
@@ -290,11 +524,7 @@ def _ensure_worker() -> None:
 
 
 def pre_gateway_dispatch(event: Any = None, **kwargs):
-    """Intercepta mensagens normais antes do dispatch legado do gateway.
-
-    Hermes chama hooks por kwargs; aceitar `event` explicitamente também mantém
-    compatibilidade com a assinatura documentada do plugin API.
-    """
+    """Encaminha mensagens normais ao Core sem bloquear o event loop do Gateway."""
     if event is None:
         event = kwargs.get('event')
     gateway = kwargs.get('gateway')
@@ -304,41 +534,79 @@ def pre_gateway_dispatch(event: Any = None, **kwargs):
 
     source = getattr(event, 'source', None)
     text = str(getattr(event, 'text', '') or '').strip()
-    logger.info("fastpath inbound text=%r platform=%s chat=%s", text[:180], getattr(getattr(source, 'platform', None), 'value', None) if source else None, getattr(source, 'chat_id', None) if source else None)
+    trace = _trace_id()
+    logger.info(
+        "fastpath trace=%s stage=inbound text=%r platform=%s chat=%s",
+        trace,
+        text[:180],
+        getattr(getattr(source, 'platform', None), 'value', None) if source else None,
+        getattr(source, 'chat_id', None) if source else None,
+    )
 
     if not text or source is None:
         return None
     if not _authorized(gateway, source):
-        logger.info("fastpath allow legacy path: sender not authorized by compatibility gate")
+        logger.info("fastpath trace=%s allow legacy path: sender not authorized", trace)
         return None
 
     _remember_channel(source)
     if text.startswith('/'):
-        logger.info("fastpath allow slash command=%r", text[:80])
+        logger.info("fastpath trace=%s allow slash command=%r", trace, text[:80])
         return None
 
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.error("fastpath trace=%s no running gateway loop; falling back to legacy dispatch", trace)
+        return None
+
+    replace = REPLACE_RE.match(text)
+    if replace:
+        _cancel_chat(source, trace)
+        text = replace.group(1).strip()
+        if not text:
+            _schedule_send(loop, gateway, source, 'Cancelei a solicitação anterior.', trace)
+            return {'action': 'skip', 'reason': 'cancelled-and-empty-replacement'}
+
+    if CANCEL_RE.match(text):
+        had_active = _cancel_chat(source, trace)
+        answer = 'Cancelei a solicitação em andamento.' if had_active else 'Limpei as solicitações pendentes desta conversa.'
+        _schedule_send(loop, gateway, source, answer, trace)
+        return {'action': 'skip', 'reason': 'user-cancelled-active-work'}
+
     if CONTINUE_RE.match(text) and _is_active(source):
-        logger.info("fastpath ignored duplicate continue while chat has active job chat=%s", getattr(source, 'chat_id', None))
+        logger.info("fastpath trace=%s ignored duplicate continue while chat has active job", trace)
         return {'action': 'skip', 'reason': 'active-job-already-continuing'}
 
     _ensure_worker()
+    is_cron = bool(CRON_RE.search(text))
+    tier = _classify_complexity(text, is_cron=is_cron)
+    key = _chat_key(source)
+    generation = _generation(key)
+    job = Job(
+        gateway=gateway,
+        source=source,
+        text=text,
+        is_cron=is_cron,
+        loop=loop,
+        trace_id=trace,
+        tier=tier,
+        generation=generation,
+        enqueued_at=time.perf_counter(),
+    )
     try:
-        _JOB_QUEUE.put_nowait((gateway, source, text, bool(CRON_RE.search(text))))
-        logger.info("fastpath queued chat=%s queue_size=%s", getattr(source, 'chat_id', None), _JOB_QUEUE.qsize())
+        _JOB_QUEUE.put_nowait(job)
+        logger.info(
+            "fastpath trace=%s stage=queued tier=%s chat=%s queue_size=%s",
+            trace, tier, getattr(source, 'chat_id', None), _JOB_QUEUE.qsize(),
+        )
     except queue.Full:
-        _schedule_send(gateway, source, 'Tenho muitas solicitações locais na fila agora. Tente novamente em alguns instantes.')
+        _schedule_send(loop, gateway, source, 'Tenho muitas solicitações locais na fila agora. Tente novamente em alguns instantes.', trace)
 
-    logger.info("fastpath SKIP legacy dispatch reason=hermes-core-background-queue")
     return {'action': 'skip', 'reason': 'hermes-core-background-queue'}
 
 
 def register(ctx):
-    """Registra o hook no PluginContext oficial do Hermes.
-
-    Antes o manifesto declarava `pre_gateway_dispatch`, mas `register()` apenas
-    iniciava o worker. Por isso o Plugin Doctor mostrava `0 hook(s)` e todas as
-    mensagens continuavam caindo no agente legado.
-    """
     ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
     _ensure_worker()
-    logger.warning("HERMES CORE FASTPATH plugin registered hook=pre_gateway_dispatch (silent progress mode)")
+    logger.warning("HERMES CORE FASTPATH plugin registered hook=pre_gateway_dispatch v1.7 (gateway-loop safe)")
