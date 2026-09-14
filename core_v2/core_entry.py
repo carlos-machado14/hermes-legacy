@@ -15,6 +15,7 @@ from developer_router import handle as handle_developer_command
 from mission_router import handle as handle_mission_command
 from universal_router import handle as handle_universal_command
 from domain_router import classify as classify_domain
+from finance_router import handle as handle_finance_command
 
 _original_llm = hermes_core.llm
 
@@ -35,6 +36,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Você não é um agente de leads: negócios é apenas um dos seus domínios. '
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
         'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
+        'Dados financeiros estruturados locais, quando existentes, são a fonte de verdade para gastos recorrentes; atualizações explícitas do usuário devem ser persistidas pelo roteador financeiro antes do LLM. '
         'Quando houver identidade delegada, ferramentas conectadas como agenda, e-mail, GitHub e comunicação são executadas pelo Freud no contexto autenticado do usuário. '
         'Credenciais de usuário nunca pertencem ao Hermes e nunca devem ser solicitadas pelo modelo quando o Freud puder fornecer uma integração. '
         'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
@@ -98,43 +100,47 @@ def _cron_status_reply(text: str) -> str | None:
 
 def ask(text: str) -> str:
     text = text.strip()
-    cron_reply = _cron_status_reply(text)
-    if cron_reply is not None:
-        reply = cron_reply
+    finance_reply = handle_finance_command(text)
+    if finance_reply is not None:
+        reply = finance_reply
     else:
-        connected_reply = handle_connected_command(text)
-        if connected_reply is not None:
-            reply = connected_reply
+        cron_reply = _cron_status_reply(text)
+        if cron_reply is not None:
+            reply = cron_reply
         else:
-            assistant_reply = handle_assistant_command(text)
-            if assistant_reply is not None:
-                reply = assistant_reply
+            connected_reply = handle_connected_command(text)
+            if connected_reply is not None:
+                reply = connected_reply
             else:
-                universal_reply = handle_universal_command(text)
-                if universal_reply is not None:
-                    reply = universal_reply
+                assistant_reply = handle_assistant_command(text)
+                if assistant_reply is not None:
+                    reply = assistant_reply
                 else:
-                    mission_reply = handle_mission_command(text)
-                    if mission_reply is not None:
-                        reply = mission_reply
+                    universal_reply = handle_universal_command(text)
+                    if universal_reply is not None:
+                        reply = universal_reply
                     else:
-                        web_reply = _web_reply(text)
-                        if web_reply is not None:
-                            reply = web_reply
+                        mission_reply = handle_mission_command(text)
+                        if mission_reply is not None:
+                            reply = mission_reply
                         else:
-                            developer_reply = handle_developer_command(text)
-                            if developer_reply is not None:
-                                reply = developer_reply
+                            web_reply = _web_reply(text)
+                            if web_reply is not None:
+                                reply = web_reply
                             else:
-                                memory_reply = handle_memory_command(text)
-                                if memory_reply is not None:
-                                    reply = memory_reply
+                                developer_reply = handle_developer_command(text)
+                                if developer_reply is not None:
+                                    reply = developer_reply
                                 else:
-                                    contextual = handle_contextual(text)
-                                    if contextual is not None:
-                                        reply = contextual
+                                    memory_reply = handle_memory_command(text)
+                                    if memory_reply is not None:
+                                        reply = memory_reply
                                     else:
-                                        reply = hermes_core.ask(text)
+                                        contextual = handle_contextual(text)
+                                        if contextual is not None:
+                                            reply = contextual
+                                        else:
+                                            reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
