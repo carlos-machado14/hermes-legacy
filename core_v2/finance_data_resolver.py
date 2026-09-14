@@ -17,7 +17,6 @@ SKIP_PARTS = {
 TEXT_SUFFIXES = {'.json', '.md', '.txt', '.yaml', '.yml'}
 MONEY_RE = re.compile(r'(?:R\$\s*\d|US\$\s*\d|\$\s*\d|€\s*\d|\bBRL\b|\bUSD\b|\bEUR\b|\b\d+[\.,]\d{2}\b)', re.I)
 FINANCE_RE = re.compile(r'\b(assinatur(?:a|as)|subscription|mensalidade|cobran[cç]a|pagamento|recorrente|recurring|plano|fatura)\b', re.I)
-BILLING_RE = re.compile(r'\b(mensal|mensalmente|anual|anualmente|weekly|monthly|yearly|semanal|renova|renova[cç][aã]o)\b', re.I)
 
 
 def _safe_files() -> list[Path]:
@@ -148,7 +147,6 @@ def _is_generated_or_prompt_source(path: Path) -> bool:
 
 
 def evidence_snippets(limit: int = 8) -> list[dict[str, str]]:
-    """Procura somente evidência financeira concreta; prompts/briefings não contam como dados."""
     found: list[dict[str, str]] = []
     for path in _safe_files():
         if _is_generated_or_prompt_source(path):
@@ -160,8 +158,6 @@ def evidence_snippets(limit: int = 8) -> list[dict[str, str]]:
         lines = text.splitlines()
         for i, line in enumerate(lines):
             window = ' '.join(x.strip() for x in lines[max(0, i - 1): min(len(lines), i + 2)] if x.strip())
-            # Para ser dado real, exige simultaneamente assunto financeiro + valor/moeda.
-            # Periodicidade sozinha (ex.: "Monthly Recurring Revenue") não é suficiente.
             if not FINANCE_RE.search(window) or not MONEY_RE.search(window):
                 continue
             if len(window) > 500:
@@ -172,8 +168,73 @@ def evidence_snippets(limit: int = 8) -> list[dict[str, str]]:
     return found
 
 
+def _iter_user_messages(value: Any, depth: int = 0):
+    if depth > 12:
+        return
+    if isinstance(value, dict):
+        role = str(value.get('role') or '').casefold()
+        content = value.get('content')
+        if role == 'user' and isinstance(content, str):
+            yield content
+        for child in value.values():
+            yield from _iter_user_messages(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_user_messages(child, depth + 1)
+
+
+def _clean_declared_item(item: str) -> str:
+    item = re.sub(r'^[\s\-•]+|[\s\-•]+$', '', item)
+    item = re.sub(r'\s+', ' ', item).strip(' .;:')
+    return item[:120]
+
+
+def legacy_declared_subscriptions() -> tuple[list[str], Path | None]:
+    """Recupera apenas listas que o próprio usuário declarou explicitamente em sessões antigas.
+
+    Não tenta inferir preço, periodicidade ou status. Isso evita transformar respostas do
+    modelo, web_search ou prompts de cron em dados financeiros do usuário.
+    """
+    sessions = HERMES / 'sessions'
+    if not sessions.exists():
+        return [], None
+    patterns = [
+        re.compile(r'\b(?:eu\s+tenho|minhas\s+assinaturas\s+(?:s[aã]o|sao)|eu\s+assino)\s*[:\-]?\s*(.+)', re.I | re.S),
+    ]
+    best: list[str] = []
+    best_source: Path | None = None
+    for path in sorted(sessions.glob('*.json')):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8', errors='ignore'))
+        except Exception:
+            continue
+        for message in _iter_user_messages(data):
+            if len(message) > 600:
+                continue
+            for pattern in patterns:
+                match = pattern.search(message)
+                if not match:
+                    continue
+                payload = match.group(1).strip()
+                # Uma lista explícita deve ter pelo menos 3 separadores/itens para não
+                # capturar frases genéricas como "eu tenho uma conta".
+                raw_items = re.split(r'\s*,\s*|\s*;\s*|\s+e\s+', payload)
+                items = [_clean_declared_item(x) for x in raw_items]
+                items = [x for x in items if 1 < len(x) <= 120]
+                deduped: list[str] = []
+                seen: set[str] = set()
+                for item in items:
+                    key = item.casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(item)
+                if len(deduped) >= 4 and len(deduped) > len(best):
+                    best = deduped[:50]
+                    best_source = path
+    return best, best_source
+
+
 def routine_inventory() -> list[dict[str, str]]:
-    """Mostra rotinas financeiras separadamente; rotina não é tratada como base de dados."""
     path = HERMES / 'cron' / 'jobs.json'
     if not path.exists():
         return []
@@ -198,10 +259,13 @@ def routine_inventory() -> list[dict[str, str]]:
 
 def diagnostic() -> dict[str, Any]:
     rows, source = structured_rows()
-    evidence = [] if rows else evidence_snippets()
+    declared, declared_source = ([], None) if rows else legacy_declared_subscriptions()
+    evidence = [] if rows or declared else evidence_snippets()
     return {
         'structured_rows': rows,
         'structured_source': str(source) if source else None,
+        'legacy_declared_subscriptions': declared,
+        'legacy_declared_source': str(declared_source) if declared_source else None,
         'evidence': evidence,
         'finance_routines': routine_inventory(),
     }
