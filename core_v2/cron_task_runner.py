@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -14,6 +15,8 @@ ROOT = Path.home() / ".hermes" / "core-v2"
 STATE = ROOT / "state"
 TASKS_FILE = STATE / "managed_crons.json"
 UA = "HermesCore/2.0 (+local-first)"
+PYTHON = ROOT / "venv" / "bin" / "python"
+CORE_ENTRY = ROOT / "core_entry.py"
 
 
 def load_tasks() -> dict:
@@ -61,10 +64,45 @@ def run_news(task: dict) -> str:
     return "\n".join(lines)
 
 
+def run_agent_task(task: dict) -> str:
+    request = str(task.get("message") or "").strip()
+    if not request:
+        return "⚠️ A rotina de pesquisa está sem instrução."
+
+    prompt = (
+        "Execute esta rotina recorrente agora, de forma autônoma e objetiva. "
+        "Use pesquisa web/browser/ferramentas locais quando necessário. "
+        "Não invente dados: só entregue informações verificáveis. "
+        "Se a tarefa pedir contato de empresa, priorize informações públicas da própria empresa ou perfis públicos confiáveis. "
+        "Retorne o resultado final pronto para Telegram, sem explicar seu processo interno.\n\n"
+        f"TAREFA RECORRENTE:\n{request}"
+    )
+    try:
+        proc = subprocess.run(
+            [str(PYTHON), str(CORE_ENTRY), prompt],
+            text=True,
+            capture_output=True,
+            timeout=240,
+            cwd=str(ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        return "⚠️ A pesquisa excedeu 4 minutos e foi interrompida. Nenhum dado foi inventado."
+    except Exception as exc:
+        return f"⚠️ Não consegui executar a pesquisa recorrente agora: {exc}"
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "erro desconhecido").strip()[-700:]
+        return f"⚠️ A rotina falhou antes de concluir: {detail}"
+    result = (proc.stdout or "").strip()
+    return result or "⚠️ A rotina concluiu sem encontrar um resultado verificável."
+
+
 def run_task(task: dict) -> str:
     kind = str(task.get("type") or "reminder")
     if kind == "news":
         return run_news(task)
+    if kind == "agent_task":
+        return run_agent_task(task)
     message = str(task.get("message") or "Lembrete").strip()
     return f"🔔 Lembrete\n{message}"
 
