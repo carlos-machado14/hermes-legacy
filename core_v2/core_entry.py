@@ -11,6 +11,8 @@ from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from developer_router import handle as handle_developer_command
 from mission_router import handle as handle_mission_command
+from universal_router import handle as handle_universal_command
+from domain_router import classify as classify_domain
 
 _original_llm = hermes_core.llm
 
@@ -25,27 +27,38 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     recent = recent_conversation(limit=4, max_chars=1600)
     sync_state_snapshots()
     long_term = retrieve_memory(prompt, limit=3, max_chars=1400)
+    route = classify_domain(prompt)
+    base_system = (
+        'Você é Hermes, uma única inteligência artificial pessoal e geral. '
+        'Você não é um agente de leads: negócios é apenas um dos seus domínios. '
+        'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
+        'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
+        'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
+    )
+    if system:
+        base_system += '\n' + system
     enriched = (
+        f"ROTEAMENTO\nDomínio principal: {route['primary_domain']} | agente: {route['agent']} | secundários: {', '.join(route['secondary_domains']) or 'nenhum'}\n\n"
         f"{context}\n\n"
         f"CONVERSA RECENTE\n{recent}\n\n"
         f"MEMÓRIA RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
         f"MENSAGEM ATUAL\n{prompt}\n\n"
-        "Responda considerando referências como isso, ele, essa ideia, aquele plano e esse objetivo. "
-        "Continue o assunto sem pedir novamente dados já disponíveis. Seja direto e útil. "
-        "Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio."
+        'Continue o assunto sem pedir novamente dados já disponíveis. Seja direto, útil e orientado a conclusão. '
+        'Quando a tarefa exigir execução longa, prefira missão durável/checkpoints. '
+        'Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio.'
     )
     low = prompt.lower()
     requested = max_tokens
     if requested is None:
         requested = 520 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 320
     try:
-        return _original_llm(enriched, system=system, max_tokens=requested)
+        return _original_llm(enriched, system=base_system, max_tokens=requested)
     except Exception as exc:
         if not _is_timeout_error(exc):
             raise
         return (
             'Demorei mais do que deveria para gerar essa resposta. Mantive o contexto e sua mensagem registrada. '
-            'Vou priorizar uma resposta mais curta/objetiva na próxima interação em vez de perder a conversa.'
+            'Se a tarefa for longa, posso executá-la como missão durável sem perder o progresso.'
         )
 
 
@@ -62,27 +75,31 @@ def _web_reply(text: str) -> str | None:
 
 def ask(text: str) -> str:
     text = text.strip()
-    mission_reply = handle_mission_command(text)
-    if mission_reply is not None:
-        reply = mission_reply
+    universal_reply = handle_universal_command(text)
+    if universal_reply is not None:
+        reply = universal_reply
     else:
-        web_reply = _web_reply(text)
-        if web_reply is not None:
-            reply = web_reply
+        mission_reply = handle_mission_command(text)
+        if mission_reply is not None:
+            reply = mission_reply
         else:
-            developer_reply = handle_developer_command(text)
-            if developer_reply is not None:
-                reply = developer_reply
+            web_reply = _web_reply(text)
+            if web_reply is not None:
+                reply = web_reply
             else:
-                memory_reply = handle_memory_command(text)
-                if memory_reply is not None:
-                    reply = memory_reply
+                developer_reply = handle_developer_command(text)
+                if developer_reply is not None:
+                    reply = developer_reply
                 else:
-                    contextual = handle_contextual(text)
-                    if contextual is not None:
-                        reply = contextual
+                    memory_reply = handle_memory_command(text)
+                    if memory_reply is not None:
+                        reply = memory_reply
                     else:
-                        reply = hermes_core.ask(text)
+                        contextual = handle_contextual(text)
+                        if contextual is not None:
+                            reply = contextual
+                        else:
+                            reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
@@ -92,7 +109,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.1 + Durable Missions + Real Web Research + Browser + Memory + GitHub', flush=True)
+        print('Hermes Core v4.2 Universal Agent Runtime + Durable Missions + Web + Memory + Developer Tools', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
