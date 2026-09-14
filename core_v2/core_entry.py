@@ -16,6 +16,8 @@ from mission_router import handle as handle_mission_command
 from universal_router import handle as handle_universal_command
 from domain_router import classify as classify_domain
 from finance_router import handle as handle_finance_command
+from semantic_intent_router import classify as classify_semantic_intent
+from semantic_dispatcher import dispatch as dispatch_semantic_intent
 
 _original_llm = hermes_core.llm
 
@@ -120,12 +122,6 @@ def _cron_management_reply(text: str) -> str | None:
 
 
 def _brief_followup_reply(text: str) -> str | None:
-    """Resolve confirmações curtas usando o assunto imediatamente anterior.
-
-    Ex.: usuário diz que os resumos das rotinas estão básicos e em seguida
-    responde apenas "sim, quero que venham com mais detalhes". Isso deve alterar
-    a preferência real do briefing, não cair no LLM genérico.
-    """
     low = text.casefold().strip()
     detail_hints = (
         'mais detalhe', 'mais detalhes', 'mais detalhado', 'mais detalhada',
@@ -156,8 +152,53 @@ def _brief_followup_reply(text: str) -> str | None:
         return None
 
 
+def _semantic_reply(text: str) -> str | None:
+    """Camada de compreensão por intenção.
+
+    Evita depender de cadastrar todas as maneiras possíveis de dizer uma mesma
+    coisa. O classificador usa a mensagem + conversa recente e devolve intenção
+    estruturada. Se falhar ou estiver inseguro, os roteadores existentes seguem
+    normalmente.
+    """
+    try:
+        context = recent_conversation(limit=6, max_chars=1800)
+        intent = classify_semantic_intent(text, context, _original_llm)
+    except Exception:
+        return None
+    if not intent or float(intent.get('confidence') or 0.0) < 0.60:
+        return None
+
+    direct = dispatch_semantic_intent(text, intent)
+    if direct is not None:
+        return direct
+
+    route = intent.get('route')
+    try:
+        if route == 'finance':
+            return handle_finance_command(text)
+        if route == 'connected':
+            return handle_connected_command(text)
+        if route == 'developer':
+            return handle_developer_command(text)
+        if route == 'memory':
+            return handle_memory_command(text)
+        if route == 'mission':
+            return handle_mission_command(text)
+        if route == 'research':
+            return _web_reply(text)
+        if route in {'assistant', 'devops'}:
+            return handle_assistant_command(text) or handle_universal_command(text)
+    except Exception:
+        return None
+    return None
+
+
 def ask(text: str) -> str:
     text = text.strip()
+
+    # Fast paths continuam existindo para operações óbvias e baratas, mas não
+    # são mais a única forma de compreender comandos. Se eles não reconhecerem
+    # a frase, a camada semântica entende a intenção pelo significado/contexto.
     followup_reply = _brief_followup_reply(text)
     if followup_reply is not None:
         reply = followup_reply
@@ -170,39 +211,43 @@ def ask(text: str) -> str:
             if cron_reply is not None:
                 reply = cron_reply
             else:
-                connected_reply = handle_connected_command(text)
-                if connected_reply is not None:
-                    reply = connected_reply
+                semantic_reply = _semantic_reply(text)
+                if semantic_reply is not None:
+                    reply = semantic_reply
                 else:
-                    assistant_reply = handle_assistant_command(text)
-                    if assistant_reply is not None:
-                        reply = assistant_reply
+                    connected_reply = handle_connected_command(text)
+                    if connected_reply is not None:
+                        reply = connected_reply
                     else:
-                        universal_reply = handle_universal_command(text)
-                        if universal_reply is not None:
-                            reply = universal_reply
+                        assistant_reply = handle_assistant_command(text)
+                        if assistant_reply is not None:
+                            reply = assistant_reply
                         else:
-                            mission_reply = handle_mission_command(text)
-                            if mission_reply is not None:
-                                reply = mission_reply
+                            universal_reply = handle_universal_command(text)
+                            if universal_reply is not None:
+                                reply = universal_reply
                             else:
-                                web_reply = _web_reply(text)
-                                if web_reply is not None:
-                                    reply = web_reply
+                                mission_reply = handle_mission_command(text)
+                                if mission_reply is not None:
+                                    reply = mission_reply
                                 else:
-                                    developer_reply = handle_developer_command(text)
-                                    if developer_reply is not None:
-                                        reply = developer_reply
+                                    web_reply = _web_reply(text)
+                                    if web_reply is not None:
+                                        reply = web_reply
                                     else:
-                                        memory_reply = handle_memory_command(text)
-                                        if memory_reply is not None:
-                                            reply = memory_reply
+                                        developer_reply = handle_developer_command(text)
+                                        if developer_reply is not None:
+                                            reply = developer_reply
                                         else:
-                                            contextual = handle_contextual(text)
-                                            if contextual is not None:
-                                                reply = contextual
+                                            memory_reply = handle_memory_command(text)
+                                            if memory_reply is not None:
+                                                reply = memory_reply
                                             else:
-                                                reply = hermes_core.ask(text)
+                                                contextual = handle_contextual(text)
+                                                if contextual is not None:
+                                                    reply = contextual
+                                                else:
+                                                    reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
@@ -212,7 +257,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.5 Independent Universal Assistant + Durable Missions + Web + Memory', flush=True)
+        print('Hermes Core v4.6 Semantic Intent Router + Independent Universal Assistant', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
