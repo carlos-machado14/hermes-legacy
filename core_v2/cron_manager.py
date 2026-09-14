@@ -153,11 +153,42 @@ def extract_target(text: str, action_words: str) -> str:
     return (m.group(1).strip(" .'\"") if m else "").strip()
 
 
+def _looks_like_status_question(text: str) -> bool:
+    t = norm(text)
+    if not any(k in t for k in ("rotina", "cron", "lembrete", "job")):
+        return False
+    question_hints = (
+        "devia", "deveria", "rodou", "executou", "executada", "executado",
+        "nao veio", "não veio", "nao rodou", "não rodou", "cade", "cadê",
+        "status", "horario", "horário", "que horas", "das 8", "as 8", "às 8",
+        "das 9", "as 9", "às 9",
+    )
+    return any(k in t for k in question_hints) or bool(re.search(r"\b\d{1,2}(?::\d{2})?h?\b", t))
+
+
+def _status_report() -> str:
+    code, out = run([HERMES, "cron", "list", "--all"], timeout=45)
+    managed = load_tasks()
+    lines = ["📋 Diagnóstico das rotinas do Hermes"]
+    if code == 0:
+        lines.extend(["", out or "Nenhuma rotina retornada pelo Hermes."])
+    else:
+        lines.extend(["", f"Não consegui listar as rotinas: {out[-800:]}"])
+    lines.extend(["", f"Rotinas locais gerenciadas registradas: {len(managed)}"])
+    if managed:
+        for task_id, task in list(managed.items())[:20]:
+            lines.append(f"- {task.get('name') or task_id} | {task.get('schedule') or '-'} | id local {task_id}")
+    lines.append("")
+    lines.append("Se uma rotina aparece ativa acima mas não entregou no horário, o problema é de execução/entrega; se não aparece, ela não está cadastrada no scheduler atual.")
+    return "\n".join(lines)
+
+
 def lifecycle(text: str) -> str | None:
     t = norm(text)
+    if _looks_like_status_question(text):
+        return _status_report()
     if any(x in t for x in ("quais rotinas", "listar rotinas", "liste as rotinas", "minhas rotinas", "listar crons")):
-        code, out = run([HERMES, "cron", "list", "--all"])
-        return out if code == 0 else f"Erro ao listar rotinas: {out}"
+        return _status_report()
     operations = [
         (("pause", "parar", "pare", "pausar"), "pause"),
         (("retome", "retomar", "continuar", "resume"), "resume"),
