@@ -9,7 +9,7 @@ SCRIPTS="$HOME/.hermes/scripts"
 MEMORY_VAULT="$HOME/.hermes/memory"
 WORKSPACES="$HOME/.hermes/workspaces"
 
-log() { printf '[core-v3.7] %s\n' "$*"; }
+log() { printf '[core-v4.4] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -27,19 +27,20 @@ mkdir -p "$TARGET" "$TARGET/state" "$TARGET/logs" "$SYSTEMD_USER" "$SCRIPTS" "$W
 mkdir -p "$MEMORY_VAULT"/{profile,goals,projects,business,conversations,decisions,daily}
 chmod 700 "$TARGET/state" "$TARGET/logs" "$MEMORY_VAULT" "$WORKSPACES" 2>/dev/null || true
 
-for file in \
-  hermes_core.py tools.py planner.py health_monitor.py local_briefs.py \
-  memory_store.py action_executor.py tool_registry.py recovery_engine.py event_bus.py \
-  project_registry.py incident_store.py watcher_engine.py api_server.py openai_bridge.py \
-  project_ops.py project_commands.py goal_manager.py task_manager.py personal_memory.py \
-  skill_registry.py opportunity_engine.py workflow_engine.py research_engine.py agent_router.py \
-  onboarding_parser.py context_builder.py decision_log.py proactive_engine.py \
-  proactive_settings.py autonomous_service.py action_queue.py autonomy_settings.py goal_execution_engine.py \
-  lead_manager.py crm_engine.py deep_research.py opportunity_hunter.py learning_engine.py business_router.py \
-  conversation_memory.py contextual_router.py core_entry.py memory_vault.py memory_router.py site_sales_workflow.py \
-  github_workspace.py developer_router.py; do
-  cp "$ROOT/core_v2/$file" "$TARGET/$file"
+# Copia todo o conjunto Python do Core antes de qualquer import/serviço. Isso evita
+# upgrades parciais em que core_entry.py chega antes de mission_router,
+# assistant_router, universal_router ou outros módulos adicionados em versões novas.
+shopt -s nullglob
+CORE_MODULES=("$ROOT"/core_v2/*.py)
+if [ ${#CORE_MODULES[@]} -eq 0 ]; then
+  log "Nenhum módulo Python encontrado em $ROOT/core_v2"
+  exit 1
+fi
+for src in "${CORE_MODULES[@]}"; do
+  cp "$src" "$TARGET/$(basename "$src")"
 done
+shopt -u nullglob
+
 cp "$ROOT/core_v2/requirements.txt" "$TARGET/requirements.txt"
 cp "$ROOT/core_v2/config.example.yaml" "$TARGET/config.example.yaml"
 
@@ -63,7 +64,7 @@ if ! "$TARGET/venv/bin/python" -m pip --version >/dev/null 2>&1; then log "pip a
 log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
-chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/openai_bridge.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py"
+chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/openai_bridge.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py" 2>/dev/null || true
 
 log "Inicializando Memory Vault leve..."
 (
@@ -73,9 +74,9 @@ log "Inicializando Memory Vault leve..."
 
 log "Validando camada GitHub..."
 if command -v gh >/dev/null 2>&1; then
-  gh auth status >/dev/null 2>&1 && log "GitHub CLI autenticada" || log "GitHub CLI instalada; execute 'gh auth login' uma vez para conectar a conta"
+  gh auth status >/dev/null 2>&1 && log "GitHub CLI autenticada (fallback/admin local)" || log "GitHub CLI instalada sem sessão; integração de usuários deve ocorrer pelo Freud"
 else
-  log "GitHub CLI ausente; instale com: sudo apt-get update && sudo apt-get install -y gh"
+  log "GitHub CLI ausente; isso não impede integrações GitHub de usuários via Freud"
 fi
 
 log "Instalando wrappers genericos opcionais (nenhuma cron sera criada)..."
@@ -97,7 +98,7 @@ make_wrapper "$SCRIPTS/financial-subscriptions-brief.sh" finance
 
 cat > "$SYSTEMD_USER/hermes-core-health.service" <<EOF
 [Unit]
-Description=Hermes Core v3 Health + Recovery
+Description=Hermes Core Health + Recovery
 After=network-online.target hermes-local-llm.service hermes-gateway.service
 [Service]
 Type=simple
@@ -112,7 +113,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-watchers.service" <<EOF
 [Unit]
-Description=Hermes Core v3 Watchers + Incident Detection
+Description=Hermes Core Watchers + Incident Detection
 After=network-online.target hermes-core-health.service
 [Service]
 Type=simple
@@ -127,7 +128,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-api.service" <<EOF
 [Unit]
-Description=Hermes Core v3.7 Local API
+Description=Hermes Core Local API
 After=network-online.target hermes-core-health.service
 [Service]
 Type=simple
@@ -161,7 +162,7 @@ EOF
 
 cat > "$SYSTEMD_USER/hermes-core-autonomous.service" <<EOF
 [Unit]
-Description=Hermes Core v3.7 Autonomous Personal + Business Agent
+Description=Hermes Core Autonomous General Agent
 After=network-online.target hermes-gateway.service hermes-core-api.service
 [Service]
 Type=simple
@@ -178,23 +179,34 @@ systemctl --user daemon-reload
 systemctl --user enable --now hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-openai-bridge.service hermes-core-autonomous.service
 systemctl --user restart hermes-core-health.service hermes-core-watchers.service hermes-core-api.service hermes-openai-bridge.service hermes-core-autonomous.service
 
-log "Validando imports..."
+log "Validando imports do Core completo..."
 (
   cd "$TARGET"
-  "$TARGET/venv/bin/python" -c 'import httpx, psutil, yaml, feedparser, bs4, sqlite3; import tools, planner, local_briefs, memory_store, action_executor, tool_registry, recovery_engine, event_bus, project_registry, incident_store, watcher_engine, api_server, openai_bridge, project_ops, project_commands, goal_manager, task_manager, personal_memory, skill_registry, opportunity_engine, workflow_engine, research_engine, onboarding_parser, context_builder, decision_log, proactive_engine, proactive_settings, autonomous_service, action_queue, autonomy_settings, goal_execution_engine, lead_manager, crm_engine, deep_research, opportunity_hunter, learning_engine, business_router, conversation_memory, contextual_router, memory_vault, memory_router, site_sales_workflow, github_workspace, developer_router, core_entry, agent_router; print("dependencias Core v3.7 OK")'
+  "$TARGET/venv/bin/python" - <<'PY'
+import importlib
+required = [
+    'core_entry','mission_router','assistant_router','assistant_os',
+    'universal_router','universal_planner','domain_router','capability_registry',
+    'agent_catalog','agent_orchestrator','job_store','execution_planner',
+    'execution_runtime','result_validator','resource_manager','audit_log',
+    'api_server','openai_bridge','memory_vault','developer_router'
+]
+for name in required:
+    importlib.import_module(name)
+print('dependencias Hermes Core v4.4 OK')
+PY
 )
 
 log "Validando APIs..."; sleep 1
 curl -fsS http://127.0.0.1:8090/health >/dev/null
 curl -fsS http://127.0.0.1:${HERMES_OPENAI_BRIDGE_PORT:-8091}/health >/dev/null || true
-log "Hermes Core v3.7 instalado/atualizado em $TARGET"
+log "Hermes Core v4.4 instalado/atualizado em $TARGET"
 echo "Memory Vault: $MEMORY_VAULT"
 echo "Workspaces GitHub: $WORKSPACES"
 echo "Indice leve SQLite: $TARGET/state/memory_index.sqlite3"
-echo "Estado pessoal e de negocios preservado em: $TARGET/state"
+echo "Estado pessoal preservado em: $TARGET/state"
 echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
-echo "Workflow diario de sites: ativo quando vinculado ao objetivo"
-echo "GitHub Workspace: leitura/clonagem/branch/commit local + ações remotas com aprovação"
+echo "GitHub CLI local: apenas fallback/admin; usuários conectam pelo Freud"
 echo "API local Core: http://127.0.0.1:8090"
-echo "Bridge OpenAI/app/voz: porta ${HERMES_OPENAI_BRIDGE_PORT:-8091} (host configuravel em ~/.config/hermes/core-api.env)"
+echo "Bridge OpenAI/app/voz: porta ${HERMES_OPENAI_BRIDGE_PORT:-8091}"
 echo "Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi criado/alterado pelo upgrade."
