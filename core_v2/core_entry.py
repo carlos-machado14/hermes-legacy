@@ -34,6 +34,8 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Você não é um agente de leads: negócios é apenas um dos seus domínios. '
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
         'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
+        'Quando executado pelo app Freud, ferramentas conectadas como agenda, e-mail, GitHub e comunicação são oferecidas pelo Freud no contexto autenticado do usuário. '
+        'Credenciais de usuário nunca pertencem ao Hermes e nunca devem ser solicitadas pelo modelo quando o Freud puder fornecer uma integração. '
         'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
         'Para tarefas longas, continue sozinho por meio do runtime durável até concluir ou encontrar bloqueio real. '
     )
@@ -115,7 +117,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.3 General Assistant OS + Universal Agent Runtime + Durable Missions + Web + Memory + Developer Tools', flush=True)
+        print('Hermes Core v4.4 Connected Universal Assistant + Durable Missions + Web + Memory + Developer Tools', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
