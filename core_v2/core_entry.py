@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import re
 import sys
+import time
 
 import hermes_core
-from connected_router import handle as handle_connected_command
 from assistant_router import handle as handle_assistant_command
+from complexity_router import classify as classify_complexity
+from connected_router import handle as handle_connected_command
 from context_builder import compact as compact_context
 from contextual_router import handle as handle_contextual
 from conversation_memory import add as remember_turn, compact as recent_conversation, recent as recent_items
-from memory_router import handle as handle_memory_command
-from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from developer_router import handle as handle_developer_command
-from mission_router import handle as handle_mission_command
-from universal_router import handle as handle_universal_command
 from domain_router import classify as classify_domain
 from finance_router import handle as handle_finance_command
-from semantic_intent_router import classify as classify_semantic_intent
+from memory_router import handle as handle_memory_command
+from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
+from mission_router import handle as handle_mission_command
 from semantic_dispatcher import dispatch as dispatch_semantic_intent
+from semantic_intent_router import classify as classify_semantic_intent
+from telemetry import emit, trace_id
+from universal_router import handle as handle_universal_command
 
 _original_llm = hermes_core.llm
 
-_EXACT_REPLY_RE = re.compile(r'^\s*(?:responda|responde)\s+(?:apenas|somente)\s*:', re.IGNORECASE)
+_EXACT_REPLY_RE = re.compile(
+    r'^\s*(?:responda|responde)\s+(?:apenas|somente)\s*:?\s*(.+?)\s*$',
+    re.IGNORECASE | re.DOTALL,
+)
 _FOLLOWUP_HINTS = (
     'isso', 'essa', 'esse', 'esta', 'este', 'aquilo', 'ela', 'ele', 'dessa', 'desse',
     'continue', 'continua', 'continuar', 'pode seguir', 'pode continuar', 'e agora', 'e depois',
@@ -56,6 +63,17 @@ def _needs_personal_context(prompt: str) -> bool:
     return any(hint in low for hint in _PERSONAL_HINTS)
 
 
+def _deterministic_reply(text: str) -> str | None:
+    """Respostas literais/health probes não devem gastar uma inferência."""
+    match = _EXACT_REPLY_RE.match(text)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1].strip()
+    return value[:1200] or None
+
+
 def _retry_small(prompt: str, system: str) -> str | None:
     try:
         return _original_llm(
@@ -65,43 +83,43 @@ def _retry_small(prompt: str, system: str) -> str | None:
                 'Se não tiver informação suficiente, diga exatamente qual dado falta. '
                 'Não diga que está trabalhando, não prometa continuar em segundo plano e não invente fatos, comandos ou ferramentas.'
             ),
-            max_tokens=180,
+            max_tokens=140,
         )
     except Exception:
         return None
 
 
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
+    profile = classify_complexity(prompt)
+    os.environ['HERMES_COMPLEXITY'] = profile.tier
+
+    use_recent = profile.use_recent or _needs_recent_context(prompt)
+    use_personal = profile.use_personal or _needs_personal_context(prompt)
     low = prompt.casefold().strip()
 
-    # Smoke tests e pedidos de resposta literal não precisam carregar memória,
-    # roteamento, objetivos ou conversa anterior. Isto também serve como caminho
-    # ultrarrápido para confirmações simples usadas pelo gateway/health checks.
-    if _EXACT_REPLY_RE.match(prompt):
-        exact_system = (
-            'Você é Hermes. Obedeça literalmente ao pedido atual. '
-            'Quando o usuário pedir para responder apenas/somente algo, devolva somente o conteúdo solicitado, sem explicações.'
-        )
-        if system:
-            exact_system += '\n' + system
-        return _original_llm(prompt, system=exact_system, max_tokens=max_tokens or 48)
-
-    use_recent = _needs_recent_context(prompt)
-    use_personal = _needs_personal_context(prompt)
+    route_started = time.perf_counter()
     route = classify_domain(prompt)
+    route_ms = (time.perf_counter() - route_started) * 1000
 
-    # O modelo local é rápido com prompts pequenos, mas um prompt contextual de
-    # milhares de tokens aumenta a latência para dezenas de segundos. Carregamos
-    # memória/contexto somente quando a mensagem realmente depende deles.
     context = ''
     recent = ''
     long_term = ''
-    if use_personal:
-        context = compact_context(max_items=2)
+    context_started = time.perf_counter()
+    if use_personal and profile.personal_items > 0:
+        context = compact_context(max_items=profile.personal_items)
         sync_state_snapshots()
-        long_term = retrieve_memory(prompt, limit=2, max_chars=650)
-    if use_recent:
-        recent = recent_conversation(limit=3, max_chars=700)
+        if profile.memory_limit > 0 and profile.memory_chars > 0:
+            long_term = retrieve_memory(
+                prompt,
+                limit=profile.memory_limit,
+                max_chars=profile.memory_chars,
+            )
+    if use_recent and profile.recent_items > 0:
+        recent = recent_conversation(
+            limit=profile.recent_items,
+            max_chars=profile.recent_chars,
+        )
+    context_ms = (time.perf_counter() - context_started) * 1000
 
     base_system = (
         'Você é Hermes, uma inteligência artificial pessoal e geral. Responda em português do Brasil. '
@@ -113,9 +131,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     if system:
         base_system += '\n' + system
 
-    sections = [
-        f"ROTA: {route['primary_domain']} / {route['agent']}",
-    ]
+    sections = [f"ROTA: {route['primary_domain']} / {route['agent']}"]
     if context:
         sections.append(context)
     if recent:
@@ -126,12 +142,41 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     sections.append('Responda ao pedido atual sem repetir contexto desnecessário e sem terminar no meio de uma frase.')
     enriched = '\n\n'.join(sections)
 
-    requested = max_tokens
-    if requested is None:
-        requested = 480 if any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')) else 240
+    requested = max_tokens or profile.max_output_tokens
+    if max_tokens is None and any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')):
+        requested = max(requested, 520)
+
+    emit(
+        'core.context',
+        elapsed_ms=context_ms,
+        tier=profile.tier,
+        route=route.get('primary_domain'),
+        route_ms=round(route_ms, 2),
+        use_recent=bool(recent),
+        use_personal=bool(context or long_term),
+        prompt_chars=len(enriched),
+        max_output_tokens=requested,
+    )
+
+    llm_started = time.perf_counter()
     try:
-        return _original_llm(enriched, system=base_system, max_tokens=requested)
+        result = _original_llm(enriched, system=base_system, max_tokens=requested)
+        emit(
+            'core.llm',
+            elapsed_ms=(time.perf_counter() - llm_started) * 1000,
+            tier=profile.tier,
+            ok=True,
+            output_chars=len(result or ''),
+        )
+        return result
     except Exception as exc:
+        emit(
+            'core.llm',
+            elapsed_ms=(time.perf_counter() - llm_started) * 1000,
+            tier=profile.tier,
+            ok=False,
+            error=str(exc)[:300],
+        )
         if not _is_timeout_error(exc):
             raise
         retry = _retry_small(enriched, base_system)
@@ -206,7 +251,7 @@ def _brief_followup_reply(text: str) -> str | None:
 
 def _semantic_reply(text: str) -> str | None:
     try:
-        context = recent_conversation(limit=6, max_chars=1800)
+        context = recent_conversation(limit=4, max_chars=900)
         intent = classify_semantic_intent(text, context, _original_llm)
     except Exception:
         return None
@@ -238,72 +283,114 @@ def _semantic_reply(text: str) -> str | None:
     return None
 
 
+def _persist_turn(text: str, reply: str) -> None:
+    try:
+        remember_turn('user', text)
+        remember_turn('assistant', reply)
+        append_daily('user', text)
+        append_daily('assistant', reply)
+    except Exception as exc:
+        emit('core.persist', ok=False, error=str(exc)[:300])
+
+
 def ask(text: str) -> str:
     text = text.strip()
-    followup_reply = _brief_followup_reply(text)
-    if followup_reply is not None:
-        reply = followup_reply
+    started = time.perf_counter()
+    tid = trace_id()
+    profile = classify_complexity(text)
+    os.environ['HERMES_COMPLEXITY'] = profile.tier
+    route_name = 'fallback_llm'
+
+    direct_literal = _deterministic_reply(text)
+    if direct_literal is not None:
+        reply = direct_literal
+        route_name = 'deterministic_literal'
     else:
-        finance_reply = handle_finance_command(text)
-        if finance_reply is not None:
-            reply = finance_reply
+        followup_reply = _brief_followup_reply(text)
+        if followup_reply is not None:
+            reply = followup_reply
+            route_name = 'brief_followup'
         else:
-            cron_reply = _cron_management_reply(text)
-            if cron_reply is not None:
-                reply = cron_reply
+            finance_reply = handle_finance_command(text)
+            if finance_reply is not None:
+                reply = finance_reply
+                route_name = 'finance'
             else:
-                semantic_reply = _semantic_reply(text)
-                if semantic_reply is not None:
-                    reply = semantic_reply
+                cron_reply = _cron_management_reply(text)
+                if cron_reply is not None:
+                    reply = cron_reply
+                    route_name = 'cron'
                 else:
-                    connected_reply = handle_connected_command(text)
-                    if connected_reply is not None:
-                        reply = connected_reply
+                    semantic_reply = _semantic_reply(text)
+                    if semantic_reply is not None:
+                        reply = semantic_reply
+                        route_name = 'semantic'
                     else:
-                        assistant_reply = handle_assistant_command(text)
-                        if assistant_reply is not None:
-                            reply = assistant_reply
+                        connected_reply = handle_connected_command(text)
+                        if connected_reply is not None:
+                            reply = connected_reply
+                            route_name = 'connected'
                         else:
-                            universal_reply = handle_universal_command(text)
-                            if universal_reply is not None:
-                                reply = universal_reply
+                            assistant_reply = handle_assistant_command(text)
+                            if assistant_reply is not None:
+                                reply = assistant_reply
+                                route_name = 'assistant'
                             else:
-                                mission_reply = handle_mission_command(text)
-                                if mission_reply is not None:
-                                    reply = mission_reply
+                                universal_reply = handle_universal_command(text)
+                                if universal_reply is not None:
+                                    reply = universal_reply
+                                    route_name = 'universal'
                                 else:
-                                    web_reply = _web_reply(text)
-                                    if web_reply is not None:
-                                        reply = web_reply
+                                    mission_reply = handle_mission_command(text)
+                                    if mission_reply is not None:
+                                        reply = mission_reply
+                                        route_name = 'mission'
                                     else:
-                                        developer_reply = handle_developer_command(text)
-                                        if developer_reply is not None:
-                                            reply = developer_reply
+                                        web_reply = _web_reply(text)
+                                        if web_reply is not None:
+                                            reply = web_reply
+                                            route_name = 'web'
                                         else:
-                                            memory_reply = handle_memory_command(text)
-                                            if memory_reply is not None:
-                                                reply = memory_reply
+                                            developer_reply = handle_developer_command(text)
+                                            if developer_reply is not None:
+                                                reply = developer_reply
+                                                route_name = 'developer'
                                             else:
-                                                contextual = handle_contextual(text)
-                                                if contextual is not None:
-                                                    reply = contextual
+                                                memory_reply = handle_memory_command(text)
+                                                if memory_reply is not None:
+                                                    reply = memory_reply
+                                                    route_name = 'memory'
                                                 else:
-                                                    reply = hermes_core.ask(text)
-    remember_turn('user', text)
-    remember_turn('assistant', reply)
-    append_daily('user', text)
-    append_daily('assistant', reply)
+                                                    contextual = handle_contextual(text)
+                                                    if contextual is not None:
+                                                        reply = contextual
+                                                        route_name = 'contextual'
+                                                    else:
+                                                        reply = hermes_core.ask(text)
+                                                        route_name = 'fallback_llm'
+
+    _persist_turn(text, reply)
+    emit(
+        'core.total',
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+        route=route_name,
+        tier=profile.tier,
+        input_chars=len(text),
+        output_chars=len(reply or ''),
+        trace=tid,
+    )
     return reply
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.7 Selective Context + Semantic Intent Router', flush=True)
+        print('Hermes Core v4.8 SLA + Selective Context + Telemetry', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
         return 0
     except Exception as exc:
+        emit('core.fatal', ok=False, error=str(exc)[:500])
         if _is_timeout_error(exc):
             print('Não consegui obter uma resposta confiável dentro do limite local.', flush=True)
             return 0
