@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 
 import hermes_core
+from assistant_router import handle as handle_assistant_command
 from context_builder import compact as compact_context
 from contextual_router import handle as handle_contextual
 from conversation_memory import add as remember_turn, compact as recent_conversation
@@ -34,6 +35,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
         'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
         'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
+        'Para tarefas longas, continue sozinho por meio do runtime durável até concluir ou encontrar bloqueio real. '
     )
     if system:
         base_system += '\n' + system
@@ -75,31 +77,35 @@ def _web_reply(text: str) -> str | None:
 
 def ask(text: str) -> str:
     text = text.strip()
-    universal_reply = handle_universal_command(text)
-    if universal_reply is not None:
-        reply = universal_reply
+    assistant_reply = handle_assistant_command(text)
+    if assistant_reply is not None:
+        reply = assistant_reply
     else:
-        mission_reply = handle_mission_command(text)
-        if mission_reply is not None:
-            reply = mission_reply
+        universal_reply = handle_universal_command(text)
+        if universal_reply is not None:
+            reply = universal_reply
         else:
-            web_reply = _web_reply(text)
-            if web_reply is not None:
-                reply = web_reply
+            mission_reply = handle_mission_command(text)
+            if mission_reply is not None:
+                reply = mission_reply
             else:
-                developer_reply = handle_developer_command(text)
-                if developer_reply is not None:
-                    reply = developer_reply
+                web_reply = _web_reply(text)
+                if web_reply is not None:
+                    reply = web_reply
                 else:
-                    memory_reply = handle_memory_command(text)
-                    if memory_reply is not None:
-                        reply = memory_reply
+                    developer_reply = handle_developer_command(text)
+                    if developer_reply is not None:
+                        reply = developer_reply
                     else:
-                        contextual = handle_contextual(text)
-                        if contextual is not None:
-                            reply = contextual
+                        memory_reply = handle_memory_command(text)
+                        if memory_reply is not None:
+                            reply = memory_reply
                         else:
-                            reply = hermes_core.ask(text)
+                            contextual = handle_contextual(text)
+                            if contextual is not None:
+                                reply = contextual
+                            else:
+                                reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
@@ -109,7 +115,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v4.2 Universal Agent Runtime + Durable Missions + Web + Memory + Developer Tools', flush=True)
+        print('Hermes Core v4.3 General Assistant OS + Universal Agent Runtime + Durable Missions + Web + Memory + Developer Tools', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
