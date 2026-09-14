@@ -91,29 +91,34 @@ def handle(text: str) -> str | None:
     match = re.fullmatch(r'conectar\s+freud\s+([a-f0-9]{8,20})', low, flags=re.I)
     if match:
         if not configured():
-            s = status()
             return (
-                'O broker Freud ainda não está configurado nesta VPS. '
-                f"URL configurada: {s['brokerUrlConfigured']} | token configurado: {s['tokenConfigured']}"
+                'A integração Hermes ↔ Freud é opcional e está desativada nesta instalação. '
+                'O Hermes continua funcionando normalmente de forma independente.'
             )
         result = link(match.group(1))
         if result.get('linked'):
-            return 'Telegram vinculado ao seu usuário Freud. A partir de agora posso usar suas integrações conectadas sem receber suas credenciais.'
-        return f"Não consegui vincular o Telegram ao Freud: {result.get('error') or result}"
+            return 'Canal vinculado ao Freud com sucesso.'
+        return f"Não consegui vincular o canal ao Freud: {result.get('error') or result}"
 
-    if low in {'status conectado', 'status freud', 'status do freud', 'integrações conectadas', 'integracoes conectadas'}:
+    if low in {'status conectado', 'status freud', 'status do freud'}:
         local = status()
         if not local['configured']:
             return (
-                'Connected Assistant local ainda não configurado. '
-                f"URL Freud: {local['brokerUrlConfigured']} | token: {local['tokenConfigured']} | canal: {local['channel'] or 'não identificado'}"
+                'Integração Hermes ↔ Freud: opcional e desativada. '
+                'O Hermes está operando de forma independente; nenhuma conexão entre VPSs é necessária.'
             )
         data = execute('connected_status', {})
         if not data.get('ok'):
-            return f"Broker configurado, mas o canal ainda não está vinculado ou está indisponível: {data.get('error')}"
+            return f"Integração opcional configurada, mas indisponível no momento: {data.get('error')}"
         return _summarize(raw, 'connected_status', data)
 
-    if not configured() or not any(hint in low for hint in CONNECTED_HINTS):
+    # Regra permanente: se a integração opcional não estiver configurada, este router
+    # não interfere em pedidos normais de agenda, e-mail, GitHub etc. Outros módulos do
+    # Hermes continuam tratando a solicitação com suas capacidades locais.
+    if not configured():
+        return None
+
+    if not any(hint in low for hint in CONNECTED_HINTS):
         return None
 
     cat = catalog()
@@ -127,5 +132,5 @@ def handle(text: str) -> str | None:
     args = decision.get('arguments') if isinstance(decision.get('arguments'), dict) else {}
     result = execute(name, args)
     if not result.get('ok'):
-        return f"Não consegui consultar o Freud agora: {result.get('error') or 'erro desconhecido'}"
+        return None
     return _summarize(raw, name, result)
