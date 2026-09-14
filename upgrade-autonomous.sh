@@ -24,6 +24,9 @@ printf '\n=== Aplicando correcoes de roteamento atual e linguagem natural ===\n'
 printf '\n=== Aplicando confirmacao conversacional de rotinas ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_routine_confirmation_v1.py"
 
+printf '\n=== Validando confirmacao de rotinas ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_routine_confirmation.py"
+
 printf '\n=== Validacoes ===\n'
 printf 'Fast Router: '; curl -fsS http://127.0.0.1:8089/health || true; echo
 printf 'Core API: '; curl -fsS http://127.0.0.1:8090/health || true; echo
