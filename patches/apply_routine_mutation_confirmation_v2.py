@@ -4,7 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 CRON = Path.home() / '.hermes' / 'core-v2' / 'cron_manager.py'
+FASTPATH = Path.home() / '.hermes' / 'plugins' / 'hermes-core-fastpath' / '__init__.py'
 MARKER = '# HERMES_ROUTINE_MUTATION_CONFIRMATION_V2'
+FASTPATH_MARKER = '# HERMES_PENDING_ROUTINE_OPS_V2'
 
 BLOCK = r'''
 # HERMES_ROUTINE_MUTATION_CONFIRMATION_V2
@@ -105,18 +107,59 @@ def handle(text: str, chat_key: str = 'default') -> str:
 '''
 
 
-def main() -> int:
+def patch_cron() -> None:
     text = CRON.read_text(encoding='utf-8')
     if MARKER in text:
         print('[skip] routine mutation confirmation already active')
-        return 0
+        return
     needle = "\nif __name__ == '__main__':\n"
     if needle in text:
         text = text.replace(needle, '\n' + BLOCK.rstrip() + '\n' + needle, 1)
     else:
         text = text.rstrip() + '\n\n' + BLOCK.rstrip() + '\n'
     CRON.write_text(text, encoding='utf-8')
-    print('OK: pause/resume/run/remove now require explicit confirmation')
+    print('[ok] pause/resume/run/remove now require explicit confirmation')
+
+
+def patch_fastpath() -> None:
+    text = FASTPATH.read_text(encoding='utf-8')
+    if FASTPATH_MARKER in text:
+        print('[skip] fastpath pending routine ops support already active')
+        return
+    anchor = "def _pending_cron_exists(key: str) -> bool:\n"
+    if anchor not in text:
+        raise RuntimeError('pending cron helper anchor not found')
+    start = text.index(anchor)
+    end = text.find('\n\ndef ', start + len(anchor))
+    if end < 0:
+        raise RuntimeError('pending cron helper end not found')
+    original = text[start:end]
+    replacement = original.replace(
+        "        path = Path.home() / '.hermes' / 'core-v2' / 'state' / 'pending_routines.json'\n        data = json.loads(path.read_text(encoding='utf-8'))\n        return isinstance(data, dict) and key in data",
+        "        state = Path.home() / '.hermes' / 'core-v2' / 'state'\n"
+        "        for filename in ('pending_routines.json', 'pending_routine_operations.json'):\n"
+        "            path = state / filename\n"
+        "            try:\n"
+        "                data = json.loads(path.read_text(encoding='utf-8'))\n"
+        "                if isinstance(data, dict) and key in data:\n"
+        "                    return True\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        return False"
+    )
+    replacement = '# HERMES_PENDING_ROUTINE_OPS_V2\n' + replacement
+    text = text[:start] + replacement + text[end:]
+    FASTPATH.write_text(text, encoding='utf-8')
+    print('[ok] fastpath routes yes/no replies for routine mutations')
+
+
+def main() -> int:
+    for path in (CRON, FASTPATH):
+        if not path.exists():
+            raise SystemExit(f'missing runtime file: {path}')
+    patch_cron()
+    patch_fastpath()
+    print('OK: routine mutations are conversational + confirmation-gated')
     return 0
 
 
