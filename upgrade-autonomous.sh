@@ -30,14 +30,30 @@ printf '\n=== Reparando ordem de execucao do cron manager ===\n'
 printf '\n=== Aplicando guarda geral de intencao ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_intent_guard_v1.py"
 
+printf '\n=== Exigindo confirmacao para mutacoes de rotinas ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_routine_mutation_confirmation_v2.py"
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/repair_routine_confirmation_guard.py"
+
+printf '\n=== Instalando Action Orchestrator universal ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_action_orchestrator_v1.py"
+
+printf '\n=== Ativando alertas proativos de incidentes ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/apply_proactive_incident_alerts_v1.py"
+
 printf '\n=== Validando confirmacao de rotinas ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_routine_confirmation.py"
+
+printf '\n=== Validando orquestracao universal ===\n'
+"$HOME/.hermes/core-v2/venv/bin/python" "$ROOT/patches/verify_action_orchestrator.py"
 
 printf '\n=== Validacoes ===\n'
 printf 'Fast Router: '; curl -fsS http://127.0.0.1:8089/health || true; echo
 printf 'Core API: '; curl -fsS http://127.0.0.1:8090/health || true; echo
 printf 'SearXNG: '; curl -fsS 'http://127.0.0.1:8087/search?q=hermes&format=json' >/dev/null 2>&1 && echo active || echo unavailable
 printf 'Conversation entry: '; test -x "$HOME/.hermes/core-v2/core_entry.py" && echo active || echo missing
+printf 'Action Orchestrator: '; test -f "$HOME/.hermes/core-v2/action_orchestrator.py" && echo active || echo missing
+printf 'Action Journal: '; test -f "$HOME/.hermes/core-v2/logs/action_journal.jsonl" && echo active || echo ready-on-first-action
+printf 'Operational policy: '; test -f "$HOME/.hermes/core-v2/state/operational_policy.json" && echo active || echo ready-on-first-action
 printf 'Optional Freud bridge code: '; test -f "$HOME/.hermes/core-v2/freud_broker_client.py" && echo available || echo missing
 printf 'Memory Vault: '; test -d "$HOME/.hermes/memory" && echo active || echo missing
 printf 'Memory index: '; test -f "$HOME/.hermes/core-v2/state/memory_index.sqlite3" && echo active || echo missing
@@ -51,6 +67,9 @@ printf 'Autonomous service: '; systemctl --user is-active hermes-core-autonomous
 printf 'Durable worker: '; systemctl --user is-active hermes-core-durable-worker.service || true
 hermes plugins list --plain 2>/dev/null | grep -i 'hermes-core-fastpath' || true
 
+printf '\n=== Reiniciando servicos alterados ===\n'
+systemctl --user restart hermes-core-autonomous.service 2>/dev/null || true
+
 printf '\n=== Smoke tests v4.5 ===\n'
 "$HOME/.hermes/core-v2/venv/bin/python" "$HOME/.hermes/core-v2/core_entry.py" 'meu dia'
 "$HOME/.hermes/core-v2/venv/bin/python" "$HOME/.hermes/core-v2/core_entry.py" 'recursos'
@@ -59,7 +78,10 @@ printf '\n=== Smoke tests v4.5 ===\n'
 
 echo
 echo 'OK: Hermes v4.5 instalado em modo independente.'
+echo 'Action Orchestrator: entender -> coletar dados -> confirmar -> executar -> validar -> registrar.'
+echo 'Contexto conversacional por chat, journal operacional, retry seguro e alertas proativos: ativos.'
+echo 'Mutações de rotina agora exigem confirmação explícita.'
 echo 'Hermes continua funcionando sozinho com memoria, web, browser, missoes, agentes e automacoes.'
 echo 'Ponte Hermes <-> Freud existe apenas como capacidade opcional futura e fica inativa sem configuracao explicita.'
 echo 'Nenhuma conexao entre VPSs e exigida.'
-echo 'Nenhuma cron, timezone, credencial, projeto, objetivo, tarefa ou dado pessoal foi removido pelo upgrade.'
+echo 'Nenhuma cron, timezone, credencial, objetivo, tarefa ou dado pessoal foi removido pelo upgrade.'
