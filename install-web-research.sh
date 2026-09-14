@@ -65,20 +65,29 @@ else
   log "Docker ausente; SearXNG não foi iniciado. Pesquisa local exigirá HERMES_SEARXNG_URL externo."
 fi
 
+systemctl --user restart hermes-core-api.service 2>/dev/null || true
+systemctl --user restart hermes-openai-bridge.service 2>/dev/null || true
+systemctl --user restart hermes-core-durable-worker.service 2>/dev/null || true
+systemctl --user restart hermes-gateway.service 2>/dev/null || true
+
 sleep 2
 printf 'SearXNG: '
 curl -fsS 'http://127.0.0.1:8087/search?q=hermes&format=json' >/dev/null 2>&1 && echo active || echo unavailable
 printf 'Playwright: '
 "$TARGET/venv/bin/python" - <<'PY'
-from browser_tools import available
-print('active' if available() else 'unavailable')
+from browser_tools import available, inspect_page
+if not available():
+    print('unavailable')
+else:
+    r=inspect_page('https://example.com', timeout_ms=15000)
+    print('active' if r.get('ok') else 'installed-but-browser-error: '+str(r.get('error','unknown'))[:120])
 PY
 printf 'Crawler/Auditor: '
 "$TARGET/venv/bin/python" - <<'PY'
 import site_crawler, site_auditor, web_research, web_router
 print('active')
 PY
+printf 'Core web API: '
+curl -fsS http://127.0.0.1:8090/web/status || true; echo
 
-systemctl --user restart hermes-core-durable-worker.service 2>/dev/null || true
-systemctl --user restart hermes-gateway.service 2>/dev/null || true
 log "Pesquisa real + navegador + crawler + auditor instalados."
