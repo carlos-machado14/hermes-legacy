@@ -124,7 +124,6 @@ def structured_rows() -> tuple[list[dict[str, Any]], Path | None]:
             continue
         rows = _walk_rows(data)
         if rows:
-            # remove duplicados simples sem alterar a origem
             unique: list[dict[str, Any]] = []
             fingerprints: set[str] = set()
             for row in rows:
@@ -136,29 +135,65 @@ def structured_rows() -> tuple[list[dict[str, Any]], Path | None]:
     return [], None
 
 
+def _is_generated_or_prompt_source(path: Path) -> bool:
+    low = str(path).casefold()
+    name = path.name.casefold()
+    if name in {'personal_profile.json', 'jobs.json'}:
+        return True
+    if '/memory/profile/' in low:
+        return True
+    if '/cron/output/' in low or '/crons/output/' in low:
+        return True
+    return False
+
+
 def evidence_snippets(limit: int = 8) -> list[dict[str, str]]:
-    """Encontra evidência financeira real, não simples menções a 'finance'."""
+    """Procura somente evidência financeira concreta; prompts/briefings não contam como dados."""
     found: list[dict[str, str]] = []
     for path in _safe_files():
+        if _is_generated_or_prompt_source(path):
+            continue
         try:
             text = path.read_text(encoding='utf-8', errors='ignore')
         except Exception:
             continue
         lines = text.splitlines()
         for i, line in enumerate(lines):
-            if not FINANCE_RE.search(line):
-                continue
             window = ' '.join(x.strip() for x in lines[max(0, i - 1): min(len(lines), i + 2)] if x.strip())
-            # Exige evidência concreta: valor/moeda ou termo de periodicidade/cobrança.
-            if not (MONEY_RE.search(window) or BILLING_RE.search(window)):
+            # Para ser dado real, exige simultaneamente assunto financeiro + valor/moeda.
+            # Periodicidade sozinha (ex.: "Monthly Recurring Revenue") não é suficiente.
+            if not FINANCE_RE.search(window) or not MONEY_RE.search(window):
                 continue
-            clean = re.sub(r'\s+', ' ', window).strip()
-            if len(clean) > 420:
-                clean = clean[:417].rstrip() + '...'
-            found.append({'path': str(path), 'snippet': clean})
+            if len(window) > 500:
+                window = window[:497].rstrip() + '...'
+            found.append({'path': str(path), 'snippet': re.sub(r'\s+', ' ', window).strip()})
             if len(found) >= limit:
                 return found
     return found
+
+
+def routine_inventory() -> list[dict[str, str]]:
+    """Mostra rotinas financeiras separadamente; rotina não é tratada como base de dados."""
+    path = HERMES / 'cron' / 'jobs.json'
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding='utf-8', errors='ignore'))
+    except Exception:
+        return []
+    jobs = data if isinstance(data, list) else data.get('jobs', []) if isinstance(data, dict) else []
+    out: list[dict[str, str]] = []
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict):
+            continue
+        blob = json.dumps(job, ensure_ascii=False).casefold()
+        if any(k in blob for k in ('financial brief', 'finanças', 'financas', 'assinatura')):
+            out.append({
+                'id': str(job.get('id') or ''),
+                'name': str(job.get('name') or ''),
+                'schedule': str(job.get('schedule') or job.get('cron') or ''),
+            })
+    return out[:20]
 
 
 def diagnostic() -> dict[str, Any]:
@@ -168,4 +203,5 @@ def diagnostic() -> dict[str, Any]:
         'structured_rows': rows,
         'structured_source': str(source) if source else None,
         'evidence': evidence,
+        'finance_routines': routine_inventory(),
     }
