@@ -289,8 +289,14 @@ def _ensure_worker() -> None:
         _WORKER_STARTED = True
 
 
-def pre_gateway_dispatch(**kwargs):
-    event = kwargs.get('event')
+def pre_gateway_dispatch(event: Any = None, **kwargs):
+    """Intercepta mensagens normais antes do dispatch legado do gateway.
+
+    Hermes chama hooks por kwargs; aceitar `event` explicitamente também mantém
+    compatibilidade com a assinatura documentada do plugin API.
+    """
+    if event is None:
+        event = kwargs.get('event')
     gateway = kwargs.get('gateway')
     if event is None or gateway is None:
         logger.warning("fastpath hook invoked without event/gateway")
@@ -327,5 +333,12 @@ def pre_gateway_dispatch(**kwargs):
 
 
 def register(ctx):
+    """Registra o hook no PluginContext oficial do Hermes.
+
+    Antes o manifesto declarava `pre_gateway_dispatch`, mas `register()` apenas
+    iniciava o worker. Por isso o Plugin Doctor mostrava `0 hook(s)` e todas as
+    mensagens continuavam caindo no agente legado.
+    """
+    ctx.register_hook('pre_gateway_dispatch', pre_gateway_dispatch)
     _ensure_worker()
-    logger.warning("HERMES CORE FASTPATH plugin registered (silent progress mode)")
+    logger.warning("HERMES CORE FASTPATH plugin registered hook=pre_gateway_dispatch (silent progress mode)")
