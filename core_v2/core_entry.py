@@ -25,6 +25,21 @@ def _is_timeout_error(exc: Exception) -> bool:
     return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout'))
 
 
+def _retry_small(prompt: str, system: str) -> str | None:
+    try:
+        return _original_llm(
+            prompt,
+            system=system + (
+                '\nResponda de forma curta e conclusiva. '
+                'Se não tiver informação suficiente, diga exatamente qual dado falta. '
+                'Não diga que está trabalhando, não prometa continuar em segundo plano e não invente fatos.'
+            ),
+            max_tokens=180,
+        )
+    except Exception:
+        return None
+
+
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
     context = compact_context(max_items=3)
     recent = recent_conversation(limit=4, max_chars=1600)
@@ -35,13 +50,14 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         'Você é Hermes, uma única inteligência artificial pessoal e geral. '
         'Você não é um agente de leads: negócios é apenas um dos seus domínios. '
         'Atue como assistente completo para vida pessoal, conhecimento, pesquisa, desenvolvimento, DevOps, negócios, finanças e comunicação. '
-        'Use especialistas e ferramentas como capacidades internas do mesmo Hermes. '
+        'Use especialistas, memória, web, browser, rotinas e ferramentas locais como capacidades internas do mesmo Hermes. '
+        'Quando não souber um fato, prefira pesquisar ou consultar uma fonte/ferramenta apropriada em vez de fingir que sabe. '
+        'Nunca diga que está trabalhando em segundo plano, que vai continuar automaticamente ou que o usuário precisa esperar, a menos que exista uma missão durável real já criada e identificável. '
         'Dados financeiros estruturados locais, quando existentes, são a fonte de verdade para gastos recorrentes; atualizações explícitas do usuário devem ser persistidas pelo roteador financeiro antes do LLM. '
         'Comandos de rotina, cron e briefing devem ser executados diretamente pelo gerenciador local quando puderem ser resolvidos deterministicamente, sem transformar uma alteração simples em missão longa. '
         'Quando houver identidade delegada, ferramentas conectadas como agenda, e-mail, GitHub e comunicação são executadas pelo Freud no contexto autenticado do usuário. '
         'Credenciais de usuário nunca pertencem ao Hermes e nunca devem ser solicitadas pelo modelo quando o Freud puder fornecer uma integração. '
         'Ações externas ou sensíveis devem respeitar aprovação e você nunca deve alegar que executou algo sem evidência. '
-        'Para tarefas realmente longas, continue sozinho por meio do runtime durável até concluir ou encontrar bloqueio real. '
     )
     if system:
         base_system += '\n' + system
@@ -52,7 +68,7 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
         f"MEMÓRIA RELEVANTE\n{long_term or 'Nenhuma memória adicional relevante.'}\n\n"
         f"MENSAGEM ATUAL\n{prompt}\n\n"
         'Continue o assunto sem pedir novamente dados já disponíveis. Seja direto, útil e orientado a conclusão. '
-        'Quando a tarefa exigir execução longa, prefira missão durável/checkpoints. '
+        'Se faltar informação, informe objetivamente o que falta. '
         'Nunca encerre a resposta no meio de uma frase ou item; conclua o raciocínio.'
     )
     low = prompt.lower()
@@ -64,10 +80,10 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     except Exception as exc:
         if not _is_timeout_error(exc):
             raise
-        return (
-            'Demorei mais do que deveria para gerar essa resposta. Mantive o contexto e sua mensagem registrada. '
-            'Se a tarefa for longa, posso executá-la como missão durável sem perder o progresso.'
-        )
+        retry = _retry_small(enriched, base_system)
+        if retry:
+            return retry
+        return 'Não consegui obter uma resposta confiável para isso agora. Reformule de forma mais específica ou peça uma pesquisa na web.'
 
 
 hermes_core.llm = _contextual_llm
@@ -162,9 +178,9 @@ def main() -> int:
         return 0
     except Exception as exc:
         if _is_timeout_error(exc):
-            print('Demorei mais do que deveria para responder, mas mantive o contexto. Sua mensagem não foi perdida.', flush=True)
+            print('Não consegui obter uma resposta confiável dentro do limite local. Tente uma pergunta mais específica ou peça pesquisa na web.', flush=True)
             return 0
-        print(f'Não consegui concluir essa resposta agora, mas o contexto foi preservado. Detalhe: {exc}', flush=True)
+        print(f'Não consegui concluir essa solicitação. Detalhe: {exc}', flush=True)
         return 0
 
 
