@@ -13,7 +13,7 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [x] Comandos conversacionais de missões/jobs
 - [x] Fastpath assíncrono sem timeout curto do Telegram
 
-## Fase 2 — Universal Agent Runtime ✅ base v4.2
+## Fase 2 — Universal Agent Runtime ✅ base v4.3
 - [x] Roteamento multi-domínio
 - [x] Catálogo de agentes especialistas internos
 - [x] Registry universal de capacidades
@@ -21,13 +21,13 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [x] Missões duráveis usando planner multi-domínio
 - [x] Contexto/memória únicos entre os domínios
 - [x] Política explícita para ações externas/sensíveis
-- [ ] Pausar/cancelar/retomar jobs individualmente
+- [x] Pausar/cancelar/retomar jobs individualmente
 - [ ] Prioridade e dependências entre jobs
 - [ ] Execução paralela controlada
-- [ ] Resource manager por CPU/RAM
+- [x] Resource manager por CPU/RAM
 - [ ] Deadline e orçamento por missão
 - [ ] Dead-letter queue
-- [ ] Auditoria completa de decisões e ações
+- [x] Auditoria durável de execução e decisões operacionais
 
 ## Fase 3 — Web & Research ✅ fundação v4.1
 - [x] SearXNG self-hosted
@@ -41,11 +41,14 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [ ] Browser actions autenticadas via Freud
 - [ ] Pesquisa iterativa até cobertura/Definition of Done
 
-## Fase 4 — Personal Assistant OS
-- [ ] Agenda/calendário integrado
+## Fase 4 — Personal Assistant OS ✅ fundação v4.3
+- [x] Panorama geral de tarefas, objetivos, projetos, missões e recursos
+- [x] Detecção local do que requer atenção
+- [x] Planejamento/roteamento com especialista Personal Assistant
+- [ ] Agenda/calendário integrado via Freud
 - [ ] Inbox universal
-- [ ] Lembretes/contexto temporal
-- [ ] Planejamento diário adaptativo
+- [ ] Lembretes/contexto temporal avançado
+- [ ] Planejamento diário adaptativo com calendário real
 - [ ] Preparação pré-reunião
 - [ ] Follow-up pessoal pós-reunião
 - [ ] Decisões e compromissos rastreados
@@ -81,6 +84,7 @@ Objetivo: transformar o Hermes em uma inteligência local-first geral, capaz de 
 - [x] Communication
 - [x] Finance
 - [x] Reviewer/Validator
+- [x] Seleção dinâmica de especialista por domínio
 - [ ] Delegação dinâmica com execução paralela
 - [ ] Especialistas com ferramentas remotas via Freud
 
