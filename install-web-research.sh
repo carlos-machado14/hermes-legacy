@@ -73,20 +73,29 @@ systemctl --user restart hermes-gateway.service 2>/dev/null || true
 sleep 2
 printf 'SearXNG: '
 curl -fsS 'http://127.0.0.1:8087/search?q=hermes&format=json' >/dev/null 2>&1 && echo active || echo unavailable
-printf 'Playwright: '
-"$TARGET/venv/bin/python" - <<'PY'
+
+# Execute os smoke tests a partir do diretório instalado. Em heredoc, Python usa o
+# diretório atual no sys.path; executar a partir do checkout raiz fazia imports como
+# browser_tools falharem mesmo com os módulos corretamente instalados em $TARGET.
+(
+  cd "$TARGET"
+  printf 'Playwright: '
+  "$TARGET/venv/bin/python" - <<'PY'
 from browser_tools import available, inspect_page
 if not available():
     print('unavailable')
 else:
-    r=inspect_page('https://example.com', timeout_ms=15000)
-    print('active' if r.get('ok') else 'installed-but-browser-error: '+str(r.get('error','unknown'))[:120])
+    r = inspect_page('https://example.com', timeout_ms=15000)
+    print('active' if r.get('ok') else 'installed-but-browser-error: ' + str(r.get('error','unknown'))[:240])
 PY
-printf 'Crawler/Auditor/Evidence/Scoring: '
-"$TARGET/venv/bin/python" - <<'PY'
+
+  printf 'Crawler/Auditor/Evidence/Scoring: '
+  "$TARGET/venv/bin/python" - <<'PY'
 import site_crawler, site_auditor, evidence_store, lead_scoring, web_research, web_router
 print('active')
 PY
+)
+
 printf 'Core web API: '
 curl -fsS http://127.0.0.1:8090/web/status || true; echo
 
