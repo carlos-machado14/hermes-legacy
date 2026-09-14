@@ -9,7 +9,7 @@ SCRIPTS="$HOME/.hermes/scripts"
 MEMORY_VAULT="$HOME/.hermes/memory"
 WORKSPACES="$HOME/.hermes/workspaces"
 
-log() { printf '[core-v4.4] %s\n' "$*"; }
+log() { printf '[core-v4.8] %s\n' "$*"; }
 
 ensure_venv_support() {
   local pyver pkg probe
@@ -65,6 +65,9 @@ log "Instalando dependencias..."
 "$TARGET/venv/bin/python" -m pip install --upgrade pip
 "$TARGET/venv/bin/python" -m pip install -r "$TARGET/requirements.txt"
 chmod +x "$TARGET/hermes_core.py" "$TARGET/core_entry.py" "$TARGET/openai_bridge.py" "$TARGET/health_monitor.py" "$TARGET/local_briefs.py" "$TARGET/recovery_engine.py" "$TARGET/watcher_engine.py" "$TARGET/api_server.py" "$TARGET/autonomous_service.py" 2>/dev/null || true
+
+log "Validando sintaxe do Core..."
+"$TARGET/venv/bin/python" -m py_compile "$TARGET"/*.py
 
 log "Inicializando Memory Vault leve..."
 (
@@ -187,25 +190,28 @@ import importlib
 required = [
     'core_entry','mission_router','assistant_router','assistant_os',
     'universal_router','universal_planner','domain_router','capability_registry',
+    'complexity_router','telemetry',
     'agent_catalog','agent_orchestrator','job_store','execution_planner',
     'execution_runtime','result_validator','resource_manager','audit_log',
     'api_server','openai_bridge','memory_vault','developer_router'
 ]
 for name in required:
     importlib.import_module(name)
-print('dependencias Hermes Core v4.4 OK')
+print('dependencias Hermes Core v4.8 OK')
 PY
 )
 
 log "Validando APIs..."; sleep 1
 curl -fsS http://127.0.0.1:8090/health >/dev/null
 curl -fsS http://127.0.0.1:${HERMES_OPENAI_BRIDGE_PORT:-8091}/health >/dev/null || true
-log "Hermes Core v4.4 instalado/atualizado em $TARGET"
+log "Hermes Core v4.8 instalado/atualizado em $TARGET"
 echo "Memory Vault: $MEMORY_VAULT"
 echo "Workspaces GitHub: $WORKSPACES"
 echo "Indice leve SQLite: $TARGET/state/memory_index.sqlite3"
+echo "Telemetria de performance: $TARGET/logs/perf.jsonl"
 echo "Estado pessoal preservado em: $TARGET/state"
 echo "Memoria longa seletiva + conversa curta + JSON estruturado: ativos"
+echo "SLA fast/normal/hard/mission + roteamento por complexidade: ativos"
 echo "GitHub CLI local: apenas fallback/admin; usuários conectam pelo Freud"
 echo "API local Core: http://127.0.0.1:8090"
 echo "Bridge OpenAI/app/voz: porta ${HERMES_OPENAI_BRIDGE_PORT:-8091}"
