@@ -75,7 +75,13 @@ def save_tasks(data: dict) -> None:
 
 
 def load_brief_prefs() -> dict:
-    defaults = {"include_summary": True, "summary_chars": 420, "include_links": True, "links_are_optional": True}
+    defaults = {
+        "include_summary": True,
+        "summary_chars": 520,
+        "include_links": True,
+        "links_are_optional": True,
+        "detail_level": "normal",
+    }
     if BRIEF_PREFS.exists():
         try:
             data = json.loads(BRIEF_PREFS.read_text(encoding="utf-8"))
@@ -251,28 +257,30 @@ def update_brief_preferences(text: str) -> str | None:
     if any(k in t for k in ("resumo de cada", "resuma cada", "resumo cada", "sem precisar clicar", "sem que eu precise clicar", "sem abrir o link", "sem abrir link", "ler toda a materia", "ler toda materia")):
         prefs["include_summary"] = True
         prefs["links_are_optional"] = True
-        prefs["summary_chars"] = 520
-        changed.append("cada item agora vem com resumo suficiente para entender sem abrir a matéria")
+        prefs["summary_chars"] = max(int(prefs.get("summary_chars") or 520), 700)
+        changed.append("cada item agora vem com contexto suficiente para entender sem abrir a matéria")
     if any(k in t for k in ("sem link", "sem links", "nao quero link", "não quero link")):
         prefs["include_links"] = False
         changed.append("links ocultados")
     elif any(k in t for k in ("mantenha o link", "pode manter o link", "com link", "com links")):
         prefs["include_links"] = True
         changed.append("links mantidos apenas como fonte")
-    if any(k in t for k in ("mais detalhado", "mais completo", "resumo maior")):
-        prefs["summary_chars"] = 750
+    if any(k in t for k in ("mais detalhe", "mais detalhes", "mais detalhado", "mais detalhada", "mais completo", "mais completa", "resumo maior", "aprofund")):
+        prefs["summary_chars"] = 900
         prefs["include_summary"] = True
-        changed.append("resumos ampliados")
+        prefs["detail_level"] = "detailed"
+        changed.append("resumos ampliados para o nível detalhado")
     if any(k in t for k in ("mais curto", "mais resumido", "resumo curto")):
         prefs["summary_chars"] = 300
         prefs["include_summary"] = True
+        prefs["detail_level"] = "short"
         changed.append("resumos encurtados")
     if not changed:
         prefs["include_summary"] = True
         prefs["links_are_optional"] = True
         changed.append("briefings configurados para priorizar conteúdo direto no Telegram")
     save_brief_prefs(prefs)
-    return "✅ Atualizei as rotinas de briefing direto pelo chat.\n- " + "\n- ".join(changed) + "\nOs horários e jobs não foram alterados. A próxima execução já usa essa configuração."
+    return "✅ Atualizei de verdade o formato dos briefings.\n- " + "\n- ".join(changed) + "\nOs horários e jobs não foram alterados. A próxima execução já usa essa configuração."
 
 
 def lifecycle(text: str) -> str | None:
