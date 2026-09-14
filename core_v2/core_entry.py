@@ -8,7 +8,7 @@ from connected_router import handle as handle_connected_command
 from assistant_router import handle as handle_assistant_command
 from context_builder import compact as compact_context
 from contextual_router import handle as handle_contextual
-from conversation_memory import add as remember_turn, compact as recent_conversation
+from conversation_memory import add as remember_turn, compact as recent_conversation, recent as recent_items
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from developer_router import handle as handle_developer_command
@@ -119,49 +119,90 @@ def _cron_management_reply(text: str) -> str | None:
         return None
 
 
+def _brief_followup_reply(text: str) -> str | None:
+    """Resolve confirmações curtas usando o assunto imediatamente anterior.
+
+    Ex.: usuário diz que os resumos das rotinas estão básicos e em seguida
+    responde apenas "sim, quero que venham com mais detalhes". Isso deve alterar
+    a preferência real do briefing, não cair no LLM genérico.
+    """
+    low = text.casefold().strip()
+    detail_hints = (
+        'mais detalhe', 'mais detalhes', 'mais detalhado', 'mais detalhada',
+        'mais completo', 'mais completa', 'aprofund', 'melhor explicado',
+        'quero assim', 'pode fazer', 'sim quero', 'sim, quero',
+    )
+    if not any(k in low for k in detail_hints):
+        return None
+
+    previous_user = ''
+    for row in reversed(recent_items(limit=8)):
+        if row.get('role') == 'user':
+            previous_user = str(row.get('text') or '')
+            break
+    previous_low = previous_user.casefold()
+    topic_hints = ('rotina', 'rotinas', 'brief', 'briefing', 'resumo', 'resumos', 'notícia', 'noticia', 'tópico', 'topico')
+    if not previous_user or not any(k in previous_low for k in topic_hints):
+        return None
+
+    try:
+        from cron_manager import update_brief_preferences
+        synthetic = (
+            'atualizar rotinas e briefings: quero resumo de cada tópico mais detalhado e mais completo, '
+            'com contexto suficiente para entender sem abrir o link. ' + text
+        )
+        return update_brief_preferences(synthetic)
+    except Exception:
+        return None
+
+
 def ask(text: str) -> str:
     text = text.strip()
-    finance_reply = handle_finance_command(text)
-    if finance_reply is not None:
-        reply = finance_reply
+    followup_reply = _brief_followup_reply(text)
+    if followup_reply is not None:
+        reply = followup_reply
     else:
-        cron_reply = _cron_management_reply(text)
-        if cron_reply is not None:
-            reply = cron_reply
+        finance_reply = handle_finance_command(text)
+        if finance_reply is not None:
+            reply = finance_reply
         else:
-            connected_reply = handle_connected_command(text)
-            if connected_reply is not None:
-                reply = connected_reply
+            cron_reply = _cron_management_reply(text)
+            if cron_reply is not None:
+                reply = cron_reply
             else:
-                assistant_reply = handle_assistant_command(text)
-                if assistant_reply is not None:
-                    reply = assistant_reply
+                connected_reply = handle_connected_command(text)
+                if connected_reply is not None:
+                    reply = connected_reply
                 else:
-                    universal_reply = handle_universal_command(text)
-                    if universal_reply is not None:
-                        reply = universal_reply
+                    assistant_reply = handle_assistant_command(text)
+                    if assistant_reply is not None:
+                        reply = assistant_reply
                     else:
-                        mission_reply = handle_mission_command(text)
-                        if mission_reply is not None:
-                            reply = mission_reply
+                        universal_reply = handle_universal_command(text)
+                        if universal_reply is not None:
+                            reply = universal_reply
                         else:
-                            web_reply = _web_reply(text)
-                            if web_reply is not None:
-                                reply = web_reply
+                            mission_reply = handle_mission_command(text)
+                            if mission_reply is not None:
+                                reply = mission_reply
                             else:
-                                developer_reply = handle_developer_command(text)
-                                if developer_reply is not None:
-                                    reply = developer_reply
+                                web_reply = _web_reply(text)
+                                if web_reply is not None:
+                                    reply = web_reply
                                 else:
-                                    memory_reply = handle_memory_command(text)
-                                    if memory_reply is not None:
-                                        reply = memory_reply
+                                    developer_reply = handle_developer_command(text)
+                                    if developer_reply is not None:
+                                        reply = developer_reply
                                     else:
-                                        contextual = handle_contextual(text)
-                                        if contextual is not None:
-                                            reply = contextual
+                                        memory_reply = handle_memory_command(text)
+                                        if memory_reply is not None:
+                                            reply = memory_reply
                                         else:
-                                            reply = hermes_core.ask(text)
+                                            contextual = handle_contextual(text)
+                                            if contextual is not None:
+                                                reply = contextual
+                                            else:
+                                                reply = hermes_core.ask(text)
     remember_turn('user', text)
     remember_turn('assistant', reply)
     append_daily('user', text)
