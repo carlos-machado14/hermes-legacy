@@ -127,8 +127,9 @@ def _render_canonical_finance(now: str) -> str | None:
         return None
     expenses = [x for x in data.get('expenses', []) if isinstance(x, dict)]
     groups = [x for x in data.get('subscription_groups', []) if isinstance(x, dict)]
+    subscriptions = [x for x in data.get('subscriptions', []) if isinstance(x, dict)]
     income = data.get('income') if isinstance(data.get('income'), dict) else {}
-    if not expenses and not groups and not income:
+    if not expenses and not groups and not subscriptions and not income:
         return None
 
     t = totals(data)
@@ -137,7 +138,7 @@ def _render_canonical_finance(now: str) -> str | None:
         lines.append(f"💰 Renda mensal informada: {_brl(t['income'])}")
         lines.append("")
 
-    if groups:
+    if groups or subscriptions:
         lines.append("💳 Assinaturas")
         for group in groups:
             if not group.get('active', True):
@@ -147,6 +148,12 @@ def _render_canonical_finance(now: str) -> str | None:
             members = group.get('members') or []
             detail = f" — {', '.join(str(x) for x in members)}" if isinstance(members, list) and members else ""
             lines.append(f"• {name}: {_brl(value)}{detail}")
+        for item in subscriptions:
+            if not item.get('active', True):
+                continue
+            name = str(item.get('name') or 'Assinatura')
+            value = _money_value(item.get('monthly_value', item.get('monthly_total')))
+            lines.append(f"• {name}: {_brl(value)}")
         lines.append(f"Subtotal assinaturas: {_brl(t['subscriptions'])}")
         lines.append("")
 
