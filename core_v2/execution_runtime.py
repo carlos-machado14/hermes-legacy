@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 from typing import Any
 
@@ -7,17 +9,63 @@ import hermes_core
 from execution_planner import build_plan
 from job_store import checkpoint, get_job, list_jobs, update_job
 from result_validator import validate_final, validate_step
+from site_auditor import audit, format_audit
+from site_crawler import crawl
+from web_research import format_research, research, research_company
 
 MAX_ATTEMPTS_PER_STEP = 3
+URL_RE = re.compile(r'https?://[^\s)>\]]+', re.I)
+
+
+def _urls(previous: list[str]) -> list[str]:
+    out: list[str] = []
+    for text in reversed(previous):
+        for url in URL_RE.findall(text or ''):
+            clean = url.rstrip('.,;:')
+            if clean not in out:
+                out.append(clean)
+            if len(out) >= 5:
+                return out
+    return out
+
+
+def _execute_tool(job: dict[str, Any], step: dict[str, Any], previous: list[str]) -> str | None:
+    tool = str(step.get('tool') or 'llm')
+    instruction = str(step.get('instruction') or '')
+    request = str(job.get('request') or '')
+    if tool == 'web_research':
+        report = research_company(request, limit=6) if any(k in request.casefold() for k in ('empresa','dentista','clínica','clinica','lead','negócio','negocio')) else research(instruction or request, limit=8)
+        return format_research(report)
+    if tool == 'site_audit':
+        urls = _urls(previous)
+        if not urls:
+            report = research(request, limit=5)
+            urls = [str(x.get('url') or '') for x in report.get('results') or [] if x.get('url')]
+        if not urls:
+            return 'Nenhum site real encontrado para auditoria.'
+        return '\n\n'.join(format_audit(audit(url)) for url in urls[:3])
+    if tool == 'site_crawl':
+        urls = _urls(previous)
+        if not urls:
+            return 'Nenhuma URL encontrada nas etapas anteriores para coleta.'
+        reports = [crawl(url, max_pages=5) for url in urls[:3]]
+        parts = []
+        for report in reports:
+            parts.append(json.dumps(report, ensure_ascii=False)[:12000])
+        return '\n\n'.join(parts)
+    return None
 
 
 def _execute_step(job: dict[str, Any], step: dict[str, Any], previous: list[str]) -> str:
+    tool_output = _execute_tool(job, step, previous)
+    if tool_output is not None:
+        return tool_output
     context = '\n\n'.join(previous[-3:])[-6000:]
     prompt = (
         f"MISSÃO ORIGINAL\n{job['request']}\n\n"
         f"ETAPA ATUAL\n{step.get('title')}\n{step.get('instruction')}\n\n"
         f"RESULTADOS ANTERIORES\n{context or 'Nenhum.'}\n\n"
-        "Execute somente esta etapa. Use as ferramentas disponíveis quando necessário. "
+        "Execute somente esta etapa. Use os dados reais coletados nas etapas anteriores. "
         "Não afirme que uma ação externa ocorreu sem evidência real. Entregue resultado objetivo e completo."
     )
     return hermes_core.ask(prompt)
