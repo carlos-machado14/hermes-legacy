@@ -30,11 +30,24 @@ def _env(name: str) -> str:
 
 
 def identity() -> dict[str, str]:
-    return {
-        'channel': (os.getenv('HERMES_CHANNEL_PLATFORM') or '').strip().lower(),
-        'externalUserId': (os.getenv('HERMES_CHANNEL_USER_ID') or '').strip(),
-        'chatId': (os.getenv('HERMES_CHANNEL_CHAT_ID') or '').strip(),
-    }
+    channel = (os.getenv('HERMES_CHANNEL_PLATFORM') or '').strip().lower()
+    external_user_id = (os.getenv('HERMES_CHANNEL_USER_ID') or '').strip()
+    chat_id = (os.getenv('HERMES_CHANNEL_CHAT_ID') or '').strip()
+    if channel and external_user_id:
+        return {'channel': channel, 'externalUserId': external_user_id, 'chatId': chat_id}
+
+    # O fastpath grava o último canal Telegram autorizado antes de chamar o Core.
+    # Isso permite identidade delegada sem colocar credenciais do usuário no Hermes.
+    state = Path.home() / '.hermes' / 'core-v2' / 'state' / 'channel_state.json'
+    try:
+        data = json.loads(state.read_text(encoding='utf-8'))
+        return {
+            'channel': str(data.get('platform') or '').strip().lower(),
+            'externalUserId': str(data.get('user_id') or '').strip(),
+            'chatId': str(data.get('chat_id') or '').strip(),
+        }
+    except Exception:
+        return {'channel': '', 'externalUserId': '', 'chatId': ''}
 
 
 def configured() -> bool:
