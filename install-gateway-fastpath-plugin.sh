@@ -24,6 +24,12 @@ if ! command -v hermes >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ ! -x "$GATEWAY_PY" ]]; then
+  echo "ERRO: Python do gateway nao encontrado em $GATEWAY_PY" >&2
+  exit 1
+fi
+
+"$GATEWAY_PY" -m py_compile "$DST/__init__.py"
 hermes plugins doctor "$DST" --ci
 
 echo "[fastpath] Habilitando plugin..."
@@ -37,11 +43,6 @@ fi
 # a CLI pode reportar o plugin como habilitado enquanto um disabled legado ou uma
 # configuracao divergente impede o carregamento no processo do gateway.
 echo "[fastpath] Garantindo enablement no config.yaml..."
-if [[ ! -x "$GATEWAY_PY" ]]; then
-  echo "ERRO: Python do gateway nao encontrado em $GATEWAY_PY" >&2
-  exit 1
-fi
-
 "$GATEWAY_PY" - "$CONFIG" <<'PY'
 from pathlib import Path
 import sys
@@ -76,8 +77,8 @@ if ! hermes plugins list --plain 2>/dev/null | grep -qi 'hermes-core-fastpath'; 
   exit 1
 fi
 
-# Preflight com o MESMO Python usado pelo gateway. Assim detectamos antes do
-# restart se discovery/config do processo real consegue carregar o hook.
+# Preflight com o MESMO Python usado pelo gateway. Hermes pode expor `hooks`
+# como lista de nomes ou apenas como contagem inteira, dependendo da versao.
 echo "[fastpath] Preflight de discovery no runtime do gateway..."
 "$GATEWAY_PY" - <<'PY'
 from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -91,11 +92,22 @@ if not row:
 print('plugin=', row.get('name') or row.get('key'), 'enabled=', row.get('enabled'), 'hooks=', row.get('hooks'), 'error=', row.get('error'))
 if not row.get('enabled'):
     raise SystemExit('ERRO: plugin descoberto mas nao esta enabled no runtime')
-hooks = set(row.get('hooks') or [])
-if 'pre_gateway_dispatch' not in hooks:
-    raise SystemExit('ERRO: hook pre_gateway_dispatch nao foi registrado no runtime preflight')
+
+raw_hooks = row.get('hooks')
+if isinstance(raw_hooks, int):
+    hooks_count = raw_hooks
+    hook_names = set()
+else:
+    hook_names = set(raw_hooks or [])
+    hooks_count = len(hook_names)
+
+if hooks_count < 1:
+    raise SystemExit('ERRO: nenhum hook registrado no runtime preflight')
+if hook_names and 'pre_gateway_dispatch' not in hook_names:
+    raise SystemExit('ERRO: pre_gateway_dispatch nao aparece entre os hooks registrados')
 if row.get('error'):
     raise SystemExit(f"ERRO: plugin com erro no preflight: {row.get('error')}")
+print('preflight hooks_count=', hooks_count, 'names=', sorted(hook_names) if hook_names else '(runtime exposes count only)')
 PY
 
 _has_user_unit() {
@@ -198,9 +210,6 @@ else
   _restart_process_mode
 fi
 
-# O Doctor + preflight ja provaram o registro do hook no mesmo runtime Python.
-# Aqui verificamos que o gateway estabilizou e procuramos a mensagem de registro
-# apenas como evidencia adicional; nao falhamos por filtro de logging.
 echo "[fastpath] Verificando gateway apos restart..."
 if _has_user_unit; then
   if ! systemctl --user is-active --quiet hermes-gateway.service; then
@@ -220,4 +229,4 @@ fi
 
 echo "OK: fastpath validado pelo Plugin Doctor + discovery do mesmo Python do gateway."
 echo "OK: gateway reiniciado e estavel com hermes-core-fastpath habilitado no config.yaml."
-echo "Mensagens normais do Telegram devem passar pelo Hermes Core; comandos / continuam pertencendo ao gateway."
+echo "Mensagens normais do Telegram passam pelo Hermes Core; comandos / continuam pertencendo ao gateway."
