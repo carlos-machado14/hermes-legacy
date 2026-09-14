@@ -7,7 +7,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Any
 
 import feedparser
 import httpx
@@ -15,7 +15,8 @@ import httpx
 UA = "HermesCore/2.0 (+local-first)"
 TIMEOUT = 10.0
 MAX_ITEMS = 6
-ROOT = Path.home() / ".hermes" / "core-v2"
+HOME = Path.home()
+ROOT = HOME / ".hermes" / "core-v2"
 STATE = ROOT / "state"
 
 # Todas as fontes de notícias são consultadas com localização pt-BR para que
@@ -122,38 +123,121 @@ def render_news(kind: str, title: str, intro: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _subscription_candidates() -> list[Path]:
+    """Locais atuais + legados. Nunca move/apaga dados do usuário."""
+    candidates = [
+        STATE / "subscriptions.json",
+        HOME / ".hermes" / "state" / "subscriptions.json",
+        HOME / ".hermes" / "subscriptions.json",
+        HOME / ".hermes" / "data" / "subscriptions.json",
+        HOME / ".hermes" / "memory" / "subscriptions.json",
+        HOME / ".hermes" / "memory" / "finance" / "subscriptions.json",
+        HOME / ".hermes" / "memory" / "financeiro" / "subscriptions.json",
+    ]
+    # Alguns installs antigos usavam nomes em português/financeiro. Busca limitada
+    # apenas dentro de ~/.hermes e sem seguir outros diretórios do sistema.
+    root = HOME / ".hermes"
+    try:
+        for path in root.rglob("*.json"):
+            low = path.name.casefold()
+            if any(k in low for k in ("subscription", "assinatura", "finance", "financeiro")):
+                candidates.append(path)
+    except Exception:
+        pass
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique[:50]
+
+
+def _extract_rows(data: Any) -> list[dict]:
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("subscriptions", "assinaturas", "items", "recurring", "recorrentes"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return [x for x in rows if isinstance(x, dict)]
+    return []
+
+
+def _load_finance_rows() -> tuple[list[dict], Path | None]:
+    for path in _subscription_candidates():
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            rows = _extract_rows(data)
+            if rows:
+                return rows, path
+        except Exception:
+            continue
+    return [], None
+
+
+def _memory_finance_context() -> str:
+    try:
+        from memory_vault import retrieve, refresh_index
+        refresh_index()
+        return retrieve(
+            "assinaturas financeiro pagamentos gastos recorrentes cobrança mensal mensalidade",
+            limit=6,
+            max_chars=5000,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _row_value(row: dict, *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return row[key]
+    return default
+
+
 def render_finance() -> str:
-    path = STATE / "subscriptions.json"
     now = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M")
     lines = ["🇧🇷 Resumo Financeiro — Assinaturas", f"Atualizado em: {now}", ""]
-    if not path.exists():
-        lines.append("Nenhuma assinatura local foi configurada ainda.")
-        lines.append(f"Arquivo de configuração: {path}")
-        return "\n".join(lines)
+    rows, source = _load_finance_rows()
 
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return "\n".join(lines + [f"Erro ao ler o arquivo de assinaturas: {exc}"])
-
-    rows = data if isinstance(data, list) else data.get("subscriptions", [])
     if not rows:
-        lines.append("Nenhuma assinatura cadastrada.")
+        memory = _memory_finance_context()
+        if memory:
+            lines.append("Encontrei contexto financeiro salvo na sua memória do Hermes, mas ele ainda não está estruturado no arquivo de assinaturas:")
+            lines.append("")
+            lines.append(memory)
+            lines.append("")
+            lines.append("⚠️ Não vou dizer que você não possui dados: o Hermes encontrou informações financeiras na memória. Para totalizar automaticamente, elas precisam estar em formato estruturado.")
+            return "\n".join(lines)
+        lines.append("⚠️ Não encontrei uma base estruturada de assinaturas nos locais atuais ou legados do Hermes.")
+        lines.append("Se esses dados existiam antes, eles podem estar em outro arquivo da instalação antiga; o upgrade não deve substituí-los nem assumir que estão vazios.")
         return "\n".join(lines)
 
     total = 0.0
     for i, row in enumerate(rows, 1):
-        name = str(row.get("name", "Assinatura"))
-        value = float(row.get("value", 0) or 0)
-        currency = row.get("currency", "BRL")
-        billing = row.get("billing", "mensal")
-        next_date = row.get("next_date", "-")
-        active = bool(row.get("active", True))
+        name = str(_row_value(row, "name", "nome", "title", default="Assinatura"))
+        raw_value = _row_value(row, "value", "valor", "amount", "price", default=0)
+        try:
+            value = float(str(raw_value).replace("R$", "").replace(" ", "").replace(",", "."))
+        except Exception:
+            value = 0.0
+        currency = _row_value(row, "currency", "moeda", default="BRL")
+        billing = _row_value(row, "billing", "period", "periodicidade", "ciclo", default="mensal")
+        next_date = _row_value(row, "next_date", "nextDate", "proxima_cobranca", "próxima_cobrança", default="-")
+        active_raw = _row_value(row, "active", "ativo", default=True)
+        active = bool(active_raw) if not isinstance(active_raw, str) else active_raw.casefold() not in {"false", "0", "nao", "não", "inativa", "pausada"}
         if active:
             total += value
         status = "ativa" if active else "pausada"
         lines.append(f"{i}. {name}: {currency} {value:.2f} | {billing} | próxima cobrança: {next_date} | {status}")
     lines.extend(["", f"Total ativo informado: {total:.2f} (sem conversão cambial)"])
+    if source is not None:
+        lines.append(f"Fonte local recuperada: {source}")
     return "\n".join(lines)
 
 
