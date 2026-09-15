@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -92,6 +93,40 @@ class MultiFlowStoreTests(unittest.TestCase):
         claimed = job_store.claim_jobs(2)
         self.assertEqual({row['id'] for row in claimed}, {first['id'], second['id']})
         self.assertTrue(all(row['status'] == 'claimed' for row in claimed))
+
+    def test_legacy_jobs_database_is_migrated_before_notification_index(self):
+        legacy = sqlite3.connect(job_store.DB_PATH)
+        legacy.executescript(
+            '''
+            CREATE TABLE jobs (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              request TEXT NOT NULL,
+              status TEXT NOT NULL,
+              plan_json TEXT NOT NULL DEFAULT '[]',
+              current_step INTEGER NOT NULL DEFAULT 0,
+              result TEXT NOT NULL DEFAULT '',
+              error TEXT NOT NULL DEFAULT '',
+              attempts INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            INSERT INTO jobs(id,title,request,status,created_at,updated_at)
+            VALUES('legacyjob','Legacy','teste','running',1,1);
+            '''
+        )
+        legacy.commit()
+        legacy.close()
+
+        recovered = job_store.recover_interrupted()
+        self.assertEqual(recovered, 1)
+        with sqlite3.connect(job_store.DB_PATH) as conn:
+            cols = {row[1] for row in conn.execute('PRAGMA table_info(jobs)').fetchall()}
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list('jobs')").fetchall()}
+            status = conn.execute("SELECT status FROM jobs WHERE id='legacyjob'").fetchone()[0]
+        self.assertTrue({'source_platform', 'source_chat_id', 'source_user_id', 'notified_at'} <= cols)
+        self.assertIn('idx_jobs_notify', indexes)
+        self.assertEqual(status, 'queued')
 
 
 class CompanyResearchFilteringTests(unittest.TestCase):
