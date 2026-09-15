@@ -19,6 +19,23 @@ _ALLOWED_INTENTS = {
     'system_action', 'developer_action', 'mission', 'memory', 'assistant_action',
 }
 
+_EXPLAIN_FOLLOWUP_RE = re.compile(
+    r'^\s*(?:como assim|me explica(?: melhor)?|explique(?: melhor)?|não entendi|nao entendi|o que você quer dizer|o que voce quer dizer)\s*[?.!]*\s*$',
+    re.IGNORECASE,
+)
+
+# `missing` may contain only information the USER can reasonably provide and that is
+# actually required to fulfill the request. Internal agent state/capabilities are never
+# valid clarification questions.
+_FORBIDDEN_MISSING_TERMS = (
+    'tarefa pendente', 'tarefas pendentes', 'recurso local', 'recursos locais',
+    'ferramenta disponível', 'ferramentas disponíveis', 'ferramenta disponivel',
+    'ferramentas disponiveis', 'capacidade disponível', 'capacidades disponíveis',
+    'capacidade disponivel', 'capacidades disponiveis', 'contexto interno',
+    'estado interno', 'recursos do sistema', 'permissão interna', 'permissao interna',
+    'tool', 'tools', 'capability', 'capabilities',
+)
+
 
 def _log(event: str, payload: dict[str, Any]) -> None:
     try:
@@ -64,6 +81,36 @@ def _capability_summary() -> str:
     return '\n'.join(lines)
 
 
+def _sanitize_missing(intent: str, values: Any) -> list[str]:
+    cleaned: list[str] = []
+    for raw in (values or []):
+        item = re.sub(r'\s+', ' ', str(raw or '')).strip(' .;:-')
+        if not item:
+            continue
+        low = item.casefold()
+        if any(term in low for term in _FORBIDDEN_MISSING_TERMS):
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+
+    # Read-only research should normally proceed with sensible defaults. Ask only
+    # for genuinely user-dependent constraints, never for optional preferences.
+    if intent in {'research', 'current_info'}:
+        essential = []
+        user_dependent_hints = (
+            'cidade', 'local', 'localização', 'localizacao', 'região', 'regiao',
+            'data', 'período', 'periodo', 'produto', 'empresa específica', 'empresa especifica',
+            'arquivo', 'documento', 'url', 'link',
+        )
+        for item in cleaned:
+            low = item.casefold()
+            if any(h in low for h in user_dependent_hints):
+                essential.append(item)
+        return essential[:3]
+
+    return cleaned[:6]
+
+
 def interpret(text: str, llm: Callable[..., str]) -> dict[str, Any] | None:
     current = str(text or '').strip()
     if not current:
@@ -84,7 +131,7 @@ goal: objetivo do usuário em uma frase
 needs_tools: boolean
 capabilities: lista de nomes de capacidades úteis
 requires_confirmation: boolean
-missing: lista de informações realmente necessárias antes de executar
+missing: lista de informações REALMENTE NECESSÁRIAS que somente o USUÁRIO pode fornecer antes de executar
 reason: explicação curta da classificação
 
 Regras:
@@ -101,11 +148,14 @@ Regras:
 - assistant_action = ação geral não coberta acima.
 - Leituras/pesquisas não precisam de confirmação.
 - Qualquer mutação externa deve exigir confirmação, exceto se já estiver em um fluxo pendente que explicitamente pediu confirmação.
-- Se faltar dado essencial, preencha missing; não invente.
+- NUNCA coloque em missing itens internos do agente como ferramentas, capacidades, recursos locais, tarefas pendentes, estado do sistema, modelo, tokens ou implementação.
+- Para pesquisa, use defaults razoáveis e comece a trabalhar. Só pergunte algo se a resposta realmente depender de um dado humano indispensável, como qual cidade quando nenhuma localização puder ser inferida.
+- Não peça preferências opcionais antes de começar; pesquise primeiro e refine depois se necessário.
+- Se o pedido já contém informação suficiente para uma primeira execução útil, missing deve ser [].
 - A mensagem atual tem prioridade. Contexto antigo jamais deve transformar uma pergunta nova em cron.
 '''
     prompt = (
-        'CAPACIDADES DISPONÍVEIS:\n' + _capability_summary() +
+        'CAPACIDADES DISPONÍVEIS (isto é contexto INTERNO; nunca peça ao usuário para fornecê-las):\n' + _capability_summary() +
         '\n\nCONVERSA RECENTE:\n' + (recent or '(vazia)') +
         '\n\nMENSAGEM ATUAL:\n' + current + '\n\nJSON:'
     )
@@ -125,7 +175,7 @@ Regras:
     except Exception:
         confidence = 0.0
     data['confidence'] = confidence
-    data['missing'] = [str(x) for x in (data.get('missing') or []) if str(x).strip()][:6]
+    data['missing'] = _sanitize_missing(intent, data.get('missing'))
     data['capabilities'] = [str(x) for x in (data.get('capabilities') or []) if str(x).strip()][:8]
     _log('interpreted', {'chat': _chat_key(), 'text': current[:500], 'intent': data})
     return data
@@ -134,7 +184,7 @@ Regras:
 def _research(text: str, current: bool = False) -> str:
     from web_research import format_research, research, research_company
     low = text.casefold()
-    companyish = any(k in low for k in ('empresa', 'empresas', 'lead', 'leads', 'negócio', 'negocio', 'sem site'))
+    companyish = any(k in low for k in ('empresa', 'empresas', 'lead', 'leads', 'negócio', 'negocio', 'sem site', 'presença digital', 'presenca digital', 'cliente'))
     try:
         # Company research is intentionally capped. The old route crawled too many
         # candidates and frequently exceeded the Telegram fastpath SLA.
@@ -188,13 +238,19 @@ def _missing_reply(intent: dict[str, Any]) -> str:
     missing = intent.get('missing') or []
     goal = str(intent.get('goal') or 'essa ação')
     if len(missing) == 1:
-        return f'Entendi que você quer {goal}. Antes de continuar, preciso saber: {missing[0]}.'
-    return 'Entendi o objetivo. Antes de continuar, preciso destas informações: ' + '; '.join(missing) + '.'
+        return f'Entendi que você quer {goal}. Para eu executar corretamente, só preciso saber: {missing[0]}.'
+    return 'Entendi o objetivo. Para executar corretamente, só preciso destas informações: ' + '; '.join(missing) + '.'
 
 
 def handle(text: str, llm: Callable[..., str]) -> str | None:
     current = str(text or '').strip()
     if not current:
+        return None
+
+    # Pure explanatory follow-ups should be answered conversationally by the normal
+    # contextual LLM. Re-running the action classifier here can repeat a clarification
+    # question instead of explaining it.
+    if _EXPLAIN_FOLLOWUP_RE.match(current):
         return None
 
     # Pending action/confirmation has priority over fresh interpretation. This keeps
@@ -234,8 +290,6 @@ def handle(text: str, llm: Callable[..., str]) -> str | None:
     if kind == 'system_action':
         return _system_action(current, llm)
     if kind == 'developer_action':
-        # Mutating developer actions first pass through the universal action
-        # orchestrator so they cannot claim execution without confirmation.
         if bool(intent.get('requires_confirmation')):
             result = _system_action(current, llm)
             if result is not None:
