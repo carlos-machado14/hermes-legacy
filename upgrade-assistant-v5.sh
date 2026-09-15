@@ -13,12 +13,19 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   exit 1
 fi
 
-log "1/7 Validando contratos antes do upgrade..."
-cd "$ROOT"
-PYTHONPATH="$ROOT/core_v2" "$PYTHON_BIN" -m unittest discover -s tests -p 'test_*.py'
+log "1/8 Validando sintaxe do pacote antes do upgrade..."
+"$PYTHON_BIN" -m py_compile "$ROOT"/core_v2/*.py "$ROOT"/plugins/hermes-core-fastpath/__init__.py
+bash -n "$ROOT/install-core-v2.sh"
+bash -n "$ROOT/install-gateway-fastpath-plugin.sh"
 
-log "2/7 Instalando/atualizando Hermes Core..."
+log "2/8 Instalando/atualizando Hermes Core e dependências..."
 bash "$ROOT/install-core-v2.sh"
+
+log "3/8 Rodando contratos completos no venv instalado..."
+(
+  cd "$ROOT"
+  PYTHONPATH="$ROOT/core_v2" "$TARGET/venv/bin/python" -m unittest discover -s tests -p 'test_*.py'
+)
 
 mkdir -p "$SYSTEMD_USER"
 cat > "$SYSTEMD_USER/hermes-core-durable.service" <<EOF
@@ -53,12 +60,12 @@ Environment=HERMES_TIMEZONE=${HERMES_TIMEZONE:-America/Sao_Paulo}
 WantedBy=default.target
 EOF
 
-log "3/7 Ativando serviços de multi-flow e agenda interna..."
+log "4/8 Ativando serviços de multi-flow e agenda interna..."
 systemctl --user daemon-reload
 systemctl --user enable --now hermes-core-durable.service hermes-core-time.service
 systemctl --user restart hermes-core-durable.service hermes-core-time.service hermes-core-autonomous.service
 
-log "4/7 Ativando proatividade e autonomia segura solicitadas..."
+log "5/8 Ativando proatividade e autonomia segura solicitadas..."
 (
   cd "$TARGET"
   "$TARGET/venv/bin/python" - <<'PY'
@@ -70,29 +77,49 @@ PY
 )
 systemctl --user restart hermes-core-autonomous.service
 
-log "5/7 Instalando FastPath multi-flow no gateway..."
+log "6/8 Instalando FastPath multi-flow no gateway..."
 bash "$ROOT/install-gateway-fastpath-plugin.sh"
 
-log "6/7 Smoke tests do Time Engine e roteamento semântico..."
+log "7/8 Smoke tests de agenda, multi-flow e classificação..."
 (
   cd "$TARGET"
   "$TARGET/venv/bin/python" - <<'PY'
+import tempfile
+from pathlib import Path
+
+import job_store
 from complexity_router import classify
 from temporal_parser import parse
 
 assert classify('Qual a capital da Itália?').tier == 'normal'
 assert classify('Quero encontrar um possível cliente em Colombo PR que esteja perdendo oportunidade por não ter uma boa presença digital. Analise e me traga o melhor.').tier == 'mission'
+
 water = parse('me lembre de beber água a cada 15 minutos das 8h até 17h de segunda a sexta')
 assert water and water['recurrence']['minutes'] == 15
 assert water['recurrence']['window_start'] == '08:00'
 assert water['recurrence']['window_end'] == '17:00'
+assert water['recurrence']['weekdays'] == [0,1,2,3,4]
+
 monthly = parse('me lembre todo dia 28 do nosso aniversário de namoro')
 assert monthly and monthly['recurrence']['freq'] == 'monthly' and monthly['recurrence']['day'] == 28
-print('smoke tests v5 OK')
+
+daily = parse('todo dia às 8 me lembre de revisar minhas prioridades')
+assert daily and daily['recurrence']['time'] == '08:00'
+
+old_db = job_store.DB_PATH
+with tempfile.TemporaryDirectory() as tmp:
+    job_store.DB_PATH = Path(tmp) / 'jobs.sqlite3'
+    a = job_store.create_job('pesquisa A', source_platform='telegram', source_chat_id='smoke')
+    b = job_store.create_job('pesquisa B', source_platform='telegram', source_chat_id='smoke')
+    claimed = job_store.claim_jobs(2)
+    assert {x['id'] for x in claimed} == {a['id'], b['id']}
+job_store.DB_PATH = old_db
+
+print('smoke tests assistant v5 OK')
 PY
 )
 
-log "7/7 Verificando serviços..."
+log "8/8 Verificando serviços..."
 for service in hermes-core-durable.service hermes-core-time.service hermes-core-autonomous.service hermes-gateway.service; do
   if systemctl --user is-active --quiet "$service"; then
     echo "OK  $service"
@@ -110,15 +137,18 @@ Hermes Assistant v5 atualizado com sucesso.
 - tarefas longas duráveis em background: ativo
 - retorno automático ao finalizar: ativo
 - agenda SQLite local: ativa
-- lembretes/rotinas com janela, dias e recorrência: ativos
+- lembretes/rotinas com janela, dias, horários e recorrência: ativos
 - retry e deduplicação de entregas: ativos
+- pesquisa comercial filtra artigos/diretórios e qualifica candidatos reais
+- coleta de contatos, redes, imagens e logos públicos: ativa
 - proatividade orientada a objetivos: ativa
 - FastPath sem fila global única: ativo
 
 Testes rápidos sugeridos no Telegram:
 1) me lembre de beber água a cada 15 minutos das 8h até 17h de segunda a sexta
 2) me lembre todo dia 28 do nosso aniversário de namoro
-3) o que tenho hoje?
-4) Quero encontrar um possível cliente em Colombo PR que esteja perdendo oportunidade por não ter uma boa presença digital. Analise e me traga o melhor.
+3) todo dia às 8 me lembre de revisar minhas prioridades
+4) o que tenho hoje?
+5) Quero encontrar um possível cliente em Colombo PR que esteja perdendo oportunidade por não ter uma boa presença digital. Analise e me traga o melhor.
    Depois envie outra pergunta imediatamente; ela deve responder sem interromper o fluxo anterior.
 EOF
