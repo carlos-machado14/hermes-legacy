@@ -80,9 +80,10 @@ class TimeEngineParsingTests(unittest.TestCase):
         self.assertEqual(_message('Me lembre daqui a 2 minutos de testar o Hermes'), 'testar o Hermes')
 
     def test_monthly_time_removed_from_reminder_message(self):
+        # The cadence is removed while the natural Portuguese preposition is kept.
         self.assertEqual(
             _message('Me lembre todo dia 28 do nosso aniversário de namoro'),
-            'nosso aniversário de namoro',
+            'do nosso aniversário de namoro',
         )
 
 
