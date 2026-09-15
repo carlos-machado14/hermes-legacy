@@ -73,8 +73,6 @@ def handle(text: str) -> str | None:
         return None
     low = raw.casefold()
 
-    # A resposta numérica a uma pergunta de desambiguação precisa ser tratada
-    # antes de qualquer roteador tentar reinterpretar a mensagem.
     try:
         from ambiguity_router import resolve_pending
         pending_reply = resolve_pending(raw)
@@ -109,7 +107,7 @@ def handle(text: str) -> str | None:
             if clarification is not None:
                 return clarification
         except Exception:
-            pass
+            return 'Não consegui validar com segurança qual item você quis alterar. Nenhum dado financeiro foi modificado.'
         reply = deactivate_item(raw)
         if reply is not None:
             return reply
