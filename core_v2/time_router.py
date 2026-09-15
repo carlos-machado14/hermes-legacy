@@ -56,6 +56,23 @@ def _message(text: str) -> str:
         if candidate != cleaned:
             cleaned = candidate
             break
+
+    # When the time expression comes immediately after "me lembre", remove it
+    # from the human message. Example: "daqui a 2 minutos de testar o Hermes"
+    # must become simply "testar o Hermes".
+    leading_temporal = [
+        r'^(?:daqui\s+a|em)\s+\d+\s+(?:minutos?|horas?|dias?)\s+(?:de\s+)?',
+        r'^(?:hoje|amanhã|amanha)(?:\s+(?:às?|as)\s+\d{1,2}(?::\d{2})?\s*(?:h|horas?)?)?\s+(?:de\s+)?',
+        r'^todo\s+dia\s+(?:às?\s+|as\s+)?\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s+(?:de\s+)?',
+        r'^todo\s+dia\s+\d{1,2}\s+(?:do|da|de)?\s*',
+        r'^todo\s+ano\s+dia\s+\d{1,2}(?:\s+de\s+[A-Za-zÀ-ÿ]+)?\s+(?:do|da|de)?\s*',
+    ]
+    for pattern in leading_temporal:
+        candidate = re.sub(pattern, '', cleaned, count=1, flags=re.I)
+        if candidate != cleaned:
+            cleaned = candidate
+            break
+
     cleaned = re.sub(r'\s+a cada\s+\d+\s+(?:minutos?|horas?|dias?).*$', '', cleaned, flags=re.I)
     cleaned = re.sub(r'\s+todo\s+dia\s+\d+.*$', '', cleaned, flags=re.I)
     cleaned = re.sub(r'\s+todo\s+ano\s+.*$', '', cleaned, flags=re.I)
@@ -194,10 +211,12 @@ def agenda(period: str = 'today') -> str:
                 continue
             try:
                 dt = datetime.fromisoformat(due)
-                if dt.tzinfo is None: dt = dt.replace(tzinfo=zone)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=zone)
             except Exception:
                 try:
-                    d = datetime.fromisoformat(due + 'T18:00:00').replace(tzinfo=zone); dt = d
+                    d = datetime.fromisoformat(due + 'T18:00:00').replace(tzinfo=zone)
+                    dt = d
                 except Exception:
                     continue
             if start <= dt <= end:
@@ -242,22 +261,30 @@ def handle(text: str) -> str | None:
 
     if any(t.startswith(x) for x in ('pause ', 'pausar ', 'pare ', 'parar ')) and any(x in t for x in ('lembrete', 'rotina', 'evento', 'compromisso')):
         ref = _resolve_target(raw)
-        if not ref: return 'Qual lembrete ou rotina você quer pausar?'
-        item = pause(ref); return f"⏸️ Pausado: {item.get('message')}"
+        if not ref:
+            return 'Qual lembrete ou rotina você quer pausar?'
+        item = pause(ref)
+        return f"⏸️ Pausado: {item.get('message')}"
     if any(t.startswith(x) for x in ('retome ', 'retomar ', 'continue ')) and any(x in t for x in ('lembrete', 'rotina', 'evento', 'compromisso')):
         ref = _resolve_target(raw)
-        if not ref: return 'Qual lembrete ou rotina você quer retomar?'
-        item = resume(ref); return f"▶️ Retomado: {item.get('message')}"
+        if not ref:
+            return 'Qual lembrete ou rotina você quer retomar?'
+        item = resume(ref)
+        return f"▶️ Retomado: {item.get('message')}"
     if any(t.startswith(x) for x in ('remova ', 'remover ', 'apague ', 'apagar ', 'cancele ', 'cancelar ')) and any(x in t for x in ('lembrete', 'rotina', 'evento', 'compromisso')):
         ref = _resolve_target(raw)
-        if not ref: return 'Qual lembrete ou rotina você quer remover?'
-        item = remove(ref); return f"🗑️ Removido da agenda: {item.get('message')}"
+        if not ref:
+            return 'Qual lembrete ou rotina você quer remover?'
+        item = remove(ref)
+        return f"🗑️ Removido da agenda: {item.get('message')}"
 
     m = re.search(r'\b(?:pause|pausa|suspenda)\s+(?:isso|o lembrete|a rotina)?\s*(?:por)?\s*(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b', t)
     if m:
         ref = _resolve_target(raw)
-        if not ref: return 'Qual lembrete ou rotina você quer suspender?'
-        value = int(m.group(1)); unit = m.group(2)
+        if not ref:
+            return 'Qual lembrete ou rotina você quer suspender?'
+        value = int(m.group(1))
+        unit = m.group(2)
         seconds = value * (60 if 'minuto' in unit else 3600 if 'hora' in unit else 86400)
         item = snooze(ref, int(time.time()) + seconds)
         return f"💤 Suspendi temporariamente: {item.get('message')}"
