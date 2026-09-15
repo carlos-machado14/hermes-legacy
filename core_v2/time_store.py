@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -160,7 +161,13 @@ def compute_next(recurrence: dict[str, Any], after_ts: int | None = None, timezo
             dt = datetime.fromisoformat(str(at))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=zone)
-            return int(dt.timestamp()) if dt.timestamp() > after.timestamp() else None
+            # Store scheduler timestamps as integer seconds. Using floor here can
+            # make a one-off timestamp with microseconds look "future" before the
+            # first delivery and then look future again after claiming the same
+            # integer second. Round the target up once and compare integer seconds
+            # so a one-off occurrence can never schedule itself again.
+            candidate = int(math.ceil(dt.timestamp()))
+            return candidate if candidate > int(after.timestamp()) else None
         except Exception:
             return None
 
@@ -331,22 +338,32 @@ def claim_due(limit: int = 25, now: int | None = None) -> list[dict[str, Any]]:
             scheduled_at = int(item['next_run_at'])
             occurrence_key = datetime.fromtimestamp(scheduled_at, tz(item['timezone'])).isoformat()
             occ_id = uuid.uuid4().hex[:16]
+            inserted = False
             try:
                 conn.execute(
                     '''INSERT INTO schedule_occurrences(id,schedule_id,occurrence_key,scheduled_at,status,attempts,created_at,updated_at)
                        VALUES(?,?,?,?, 'pending',0,?,?)''',
                     (occ_id, item['id'], occurrence_key, scheduled_at, current, current),
                 )
+                inserted = True
             except sqlite3.IntegrityError:
-                pass
+                # This occurrence was already claimed by an earlier tick/process.
+                # Advance/heal the schedule below, but NEVER return the existing
+                # occurrence for delivery again.
+                inserted = False
+
             next_run = compute_next(item['recurrence'], scheduled_at, item['timezone'])
             next_status = 'completed' if next_run is None else 'active'
-            conn.execute('UPDATE schedules SET next_run_at=?, status=?, updated_at=? WHERE id=?', (next_run, next_status, current, item['id']))
-            occ = conn.execute('SELECT * FROM schedule_occurrences WHERE schedule_id=? AND occurrence_key=?', (item['id'], occurrence_key)).fetchone()
-            if occ:
-                payload = dict(occ)
-                payload['schedule'] = item
-                claimed.append(payload)
+            conn.execute(
+                'UPDATE schedules SET next_run_at=?, status=?, updated_at=? WHERE id=?',
+                (next_run, next_status, current, item['id']),
+            )
+            if inserted:
+                occ = conn.execute('SELECT * FROM schedule_occurrences WHERE id=?', (occ_id,)).fetchone()
+                if occ:
+                    payload = dict(occ)
+                    payload['schedule'] = item
+                    claimed.append(payload)
         conn.commit()
     return claimed
 
