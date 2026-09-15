@@ -61,6 +61,24 @@ def split_message(text: str, limit: int = 3600) -> list[str]:
     return chunks
 
 
+def _ambiguous_transport_error(exc: Exception) -> bool:
+    """True when Telegram may have accepted the message before the client errored.
+
+    Telegram's Bot API does not expose an idempotency key for sendMessage. Retrying
+    a read/write/protocol failure can therefore produce duplicate notifications.
+    """
+    return isinstance(
+        exc,
+        (
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.ReadError,
+            httpx.WriteError,
+            httpx.RemoteProtocolError,
+        ),
+    )
+
+
 def send_telegram(text: str, *, chat_id: str | None = None, attempts: int = 3) -> tuple[bool, str]:
     token = _env('TELEGRAM_BOT_TOKEN')
     ch = channel() or {}
@@ -72,12 +90,13 @@ def send_telegram(text: str, *, chat_id: str | None = None, attempts: int = 3) -
     chunks = split_message(text)
     if not chunks:
         return False, 'empty_message'
+
     last_error = ''
     for chunk in chunks:
         delivered = False
         for attempt in range(1, max(1, attempts) + 1):
             try:
-                with httpx.Client(timeout=15) as client:
+                with httpx.Client(timeout=20) as client:
                     r = client.post(
                         f'https://api.telegram.org/bot{token}/sendMessage',
                         json={'chat_id': target, 'text': chunk},
@@ -85,11 +104,22 @@ def send_telegram(text: str, *, chat_id: str | None = None, attempts: int = 3) -
                 if r.is_success:
                     delivered = True
                     break
+
                 last_error = f'HTTP {r.status_code}: {r.text[-300:]}'
+                # 4xx (except rate limit) are deterministic failures. Repeating them
+                # only wastes attempts and cannot make the request valid.
+                if 400 <= r.status_code < 500 and r.status_code != 429:
+                    return False, last_error
             except Exception as exc:
-                last_error = str(exc)
+                if _ambiguous_transport_error(exc):
+                    # Do not retry inside this call: Telegram may already have
+                    # accepted sendMessage even though the response was lost.
+                    return False, f'ambiguous_delivery:{type(exc).__name__}:{exc}'
+                last_error = f'{type(exc).__name__}:{exc}'
+
             if attempt < attempts:
                 time.sleep(min(2 ** attempt, 5))
+
         if not delivered:
             return False, last_error or 'telegram_delivery_failed'
     return True, ''
