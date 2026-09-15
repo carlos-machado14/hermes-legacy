@@ -5,6 +5,7 @@ import fcntl
 import json
 import re
 import signal
+import sqlite3
 import time
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ from typing import Any, IO
 
 from delivery import send_telegram
 from temporal_parser import parse
-from time_store import claim_due, create_schedule, failed_for_retry, list_schedules, mark_delivery, occurrence_stats
+from time_store import DB_PATH, claim_due, create_schedule, list_schedules, mark_delivery, occurrence_stats
 
 ROOT = Path.home() / '.hermes' / 'core-v2'
 STATE = ROOT / 'state'
@@ -31,11 +32,7 @@ def _log(message: str) -> None:
 
 
 def _acquire_singleton() -> bool:
-    """Guarantee only one Time Engine process can deliver reminders.
-
-    systemd already provides one service process, but this also protects against a
-    manually started copy, a stale upgrade process or overlapping service starts.
-    """
+    """Guarantee only one Time Engine process can deliver reminders."""
     global _LOCK_HANDLE
     STATE.mkdir(parents=True, exist_ok=True)
     handle = LOCK.open('a+', encoding='utf-8')
@@ -71,19 +68,62 @@ def _format_occurrence(item: dict[str, Any]) -> str:
     return f'🔔 Lembrete\n{message}'
 
 
+def _finalize_failed_delivery(occurrence_id: str, error: str) -> None:
+    """Finish a failed Telegram attempt without scheduling another send.
+
+    Telegram sendMessage has no idempotency key. If the connection fails after
+    Telegram accepted the request, retrying can create duplicate notifications.
+    Reminder delivery therefore uses at-most-once semantics: one network send per
+    occurrence. Failures become terminal and are surfaced by the health monitor.
+    """
+    current = int(time.time())
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        row = conn.execute(
+            'SELECT attempts FROM schedule_occurrences WHERE id=?',
+            (occurrence_id,),
+        ).fetchone()
+        attempts = int((row[0] if row else 0) or 0) + 1
+        conn.execute(
+            """UPDATE schedule_occurrences
+               SET status='failed', attempts=?, next_retry_at=NULL,
+                   last_error=?, updated_at=?
+               WHERE id=?""",
+            (attempts, f'at_most_once:{str(error or "telegram_delivery_failed")[-900:]}', current, occurrence_id),
+        )
+
+
+def _quarantine_legacy_retries() -> int:
+    """Disable retry rows created by earlier versions before the service starts."""
+    current = int(time.time())
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        cur = conn.execute(
+            """UPDATE schedule_occurrences
+               SET status='failed', next_retry_at=NULL,
+                   last_error='at_most_once:legacy_retry_disabled:' || last_error,
+                   updated_at=?
+               WHERE status='retry'""",
+            (current,),
+        )
+        return int(cur.rowcount or 0)
+
+
 def _deliver(occ: dict[str, Any]) -> None:
     item = occ.get('schedule') or {}
     occurrence_id = str(occ['id'])
     if not item:
-        mark_delivery(occurrence_id, ok=False, error='schedule_missing')
+        _finalize_failed_delivery(occurrence_id, 'schedule_missing')
         return
 
-    # Notification delivery is intentionally a single Telegram send attempt. The
-    # Bot API has no idempotency key; retrying an ambiguous read/write timeout can
-    # create duplicate messages even when Telegram accepted the first request.
+    # Exactly one Telegram request is made for each occurrence. We intentionally
+    # do not retry failed/ambiguous responses because sendMessage is not
+    # idempotent and a retry can produce duplicate notifications.
     ok, error = send_telegram(_format_occurrence(item), attempts=1)
-    mark_delivery(occurrence_id, ok=ok, error=error)
-    state = 'delivered' if ok else ('ambiguous' if error.startswith('ambiguous_delivery:') else 'retry')
+    if ok:
+        mark_delivery(occurrence_id, ok=True)
+        state = 'delivered'
+    else:
+        _finalize_failed_delivery(occurrence_id, error)
+        state = 'failed_no_retry'
     _log(
         f"occurrence={occ.get('id')} schedule={item.get('id')} state={state} "
         f"ok={ok} error={error[:160] if error else ''}"
@@ -156,13 +196,7 @@ def migrate_legacy_reminders() -> int:
 
 
 def tick() -> None:
-    for occ in failed_for_retry(limit=30):
-        error = str(occ.get('last_error') or '')
-        if error.startswith('ambiguous_delivery:'):
-            # At-most-once policy for uncertain Telegram outcomes. Retrying here
-            # could duplicate a message that Telegram already accepted.
-            continue
-        _deliver(occ)
+    # No automatic retry loop here. A schedule occurrence is sent at most once.
     for occ in claim_due(limit=50):
         _deliver(occ)
 
@@ -175,9 +209,14 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+    quarantined = _quarantine_legacy_retries()
     migrated = migrate_legacy_reminders()
-    _log(f'time-engine started migrated={migrated}')
-    print(f'Hermes Time Engine ativo; lembretes legados migrados={migrated}', flush=True)
+    _log(f'time-engine started migrated={migrated} quarantined_retries={quarantined}')
+    print(
+        f'Hermes Time Engine ativo; lembretes legados migrados={migrated}; '
+        f'retries antigos bloqueados={quarantined}',
+        flush=True,
+    )
     while RUNNING:
         try:
             tick()
