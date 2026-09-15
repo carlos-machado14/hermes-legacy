@@ -1,5 +1,5 @@
 name: hermes-core-fastpath
-version: 1.7.0
-description: Intercepta mensagens normais do gateway, aplica SLA por complexidade e devolve respostas pelo event loop original, preservando comandos slash.
+version: 2.0.0
+description: FastPath concorrente do Hermes com multi-flow, missões duráveis e Time Engine local.
 provides_hooks:
   - pre_gateway_dispatch
