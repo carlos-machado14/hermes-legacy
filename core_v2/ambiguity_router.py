@@ -304,15 +304,15 @@ def _approval_root(actions: list[dict[str, Any]]) -> str:
         return (
             '🤖 Hermes — preciso da sua decisão\n\n'
             + _approval_detail(actions[0])
-            + '\n\n1. Aprovar e continuar\n2. Recusar\n3. Ver detalhes\n4. Decidir depois\n\n'
+            + '\n\n1. Aprovar\n2. Recusar\n3. Ver detalhes\n4. Decidir depois\n\n'
             + 'Responda apenas com o número.'
         )
     lines = ['🤖 Hermes — preciso da sua decisão', '', 'Há ações aguardando aprovação:']
-    for index, action in enumerate(actions, 1):
-        lines.append(f"{index}. {action.get('title')} [{action.get('id')}]")
+    for action in actions:
+        lines.append(f"- {action.get('title')} [{action.get('id')}]")
     lines += [
         '', 'O que deseja fazer?',
-        '1. Aprovar todas e continuar',
+        '1. Aprovar todas',
         '2. Recusar todas',
         '3. Revisar uma por uma',
         '4. Ver detalhes de todas',
@@ -389,7 +389,7 @@ def _approval_pick(actions: list[dict[str, Any]]) -> str:
 def _approval_action_menu(action: dict[str, Any]) -> str:
     return (
         f"Você escolheu:\n{action.get('title')} [{action.get('id')}]\n\n"
-        '1. Aprovar e continuar\n2. Recusar\n3. Ver detalhes\n4. Voltar\n\n'
+        '1. Aprovar\n2. Recusar\n3. Ver detalhes\n4. Voltar\n\n'
         'Responda apenas com o número.'
     )
 
