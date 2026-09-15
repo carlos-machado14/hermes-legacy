@@ -17,9 +17,9 @@ STATE_DIR = Path.home() / '.hermes/core-v2/state'
 RESULTS_DIR = STATE_DIR / 'execution_results'
 
 EXTERNAL_WORDS = ('enviar','mande','mandar','publicar','postar','contatar','contactar','ligar','comprar','pagar','vender','fechar negócio','fechar negocio','deletar','apagar','reiniciar','deploy','executar comando')
-RESEARCH_WORDS = ('pesquisar','pesquise','buscar','encontrar','mapear','levantar','procurar','coletar dados')
+RESEARCH_WORDS = ('pesquisar','pesquise','pesquisa','pesquisa de mercado','buscar','busca','encontrar','mapear','mapeamento','levantar','levantamento','procurar','coletar dados','prospecção','prospeccao')
 DRAFT_WORDS = ('proposta','rascunho','copy','mensagem','oferta','roteiro','script','abordagem')
-ANALYSIS_WORDS = ('analisar','comparar','priorizar','avaliar','organizar','planejar','definir','revisar','salvar empresa como lead','acompanhar resposta')
+ANALYSIS_WORDS = ('analisar','análise','analise','comparar','comparação','comparacao','priorizar','avaliar','avaliação','avaliacao','organizar','planejar','definir','revisar','salvar empresa como lead','acompanhar resposta')
 
 
 def classify_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -131,9 +131,6 @@ def execute_action(ref: str, *, force_approved: bool = False) -> dict[str, Any]:
 
     kind=action.get('kind')
     if kind in {'external_action','user_action'}:
-        # Aprovação e execução são estados diferentes. Depois que o usuário aprova,
-        # não marcamos a ação como bloqueada. Ela fica pronta para o executor remoto
-        # (Freud/connectors) ou para uma implementação específica posterior.
         if action.get('status') == 'approved' or force_approved:
             result = 'Aprovação registrada. A ação está pronta para execução pelo conector responsável; nenhuma ação externa foi simulada localmente.'
             return update_action(action['id'], status='approved', result=result, approved_ready_at=int(time.time()))
@@ -143,7 +140,7 @@ def execute_action(ref: str, *, force_approved: bool = False) -> dict[str, Any]:
     update_action(action['id'], status='running', started_at=int(time.time()))
     try:
         if kind == 'research':
-            query = re.sub(r'^(pesquisar|pesquise|buscar|encontrar|mapear|levantar|procurar)\s+', '', action.get('title',''), flags=re.I).strip() or action.get('title','')
+            query = re.sub(r'^(pesquisar|pesquise|pesquisa|buscar|busca|encontrar|mapear|mapeamento|levantar|levantamento|procurar)\s+', '', action.get('title',''), flags=re.I).strip() or action.get('title','')
             result = format_results(query, limit=5)
         elif kind == 'draft': result = _draft(action)
         elif kind == 'analysis': result = _analysis(action)
