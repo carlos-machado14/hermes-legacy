@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from assistant_os import attention, brief
 from resource_manager import snapshot as resource_snapshot
+from time_router import handle as handle_time
 
 
 def handle(text: str) -> str | None:
+    temporal = handle_time(text)
+    if temporal is not None:
+        return temporal
+
     low = text.strip().casefold()
     if low in {
         'meu dia','como está meu dia','como esta meu dia','panorama','panorama geral',
