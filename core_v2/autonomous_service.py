@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ambiguity_router import register_approval_prompt
 from autonomy_settings import load as load_autonomy_settings
 from decision_log import recent as recent_decisions, record
 from delivery import channel, send_telegram
@@ -34,7 +35,9 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _send(text: str) -> bool:
-    ok,_=send_telegram(text,attempts=2); return ok
+    # Proactive notifications are at-most-once. An ambiguous Telegram response must
+    # never turn into duplicated prompts asking for the same approval.
+    ok,_=send_telegram(text,attempts=1); return ok
 
 
 def _quiet(settings: dict[str, Any], now: datetime) -> bool:
@@ -60,6 +63,7 @@ def _overdue_high_tasks() -> list[dict[str, Any]]:
 
 def _slot(runtime: dict[str, Any], key: str, stamp: str) -> bool: return runtime.get(key)!=stamp
 
+
 def _mark(runtime: dict[str, Any], key: str, stamp: Any) -> None:
     runtime[key]=stamp; runtime['updated_at']=int(time.time()); _write_json(RUNTIME_FILE,runtime)
 
@@ -80,17 +84,25 @@ def _autonomy_cycle(runtime: dict[str, Any]) -> bool:
     minutes=max(5,int(settings.get('cycle_minutes',30))); bucket=int(time.time()//(minutes*60))
     if runtime.get('autonomy_bucket')==bucket: return False
     report=run_cycle(); _mark(runtime,'autonomy_bucket',bucket)
-    executed=report.get('executed') or []; waiting=report.get('waiting_approval') or []
-    if not executed and not waiting: return False
-    lines=['🤖 Hermes — avancei sozinho nas suas prioridades']
-    if executed:
-        lines.append('\nConcluí:')
-        for action in executed[:5]: lines.append(f"- {action.get('title')}")
+    executed=report.get('executed') or []
+    waiting=report.get('waiting_approval') or []
     pending=[a for a in waiting if a.get('status')=='pending_approval']
-    if pending:
-        lines.append('\nPreciso da sua aprovação antes de continuar:')
-        for action in pending[:5]: lines.append(f"- [{action.get('id')}] {action.get('title')}")
-    return _send('\n'.join(lines))
+    approval_text=register_approval_prompt(pending) if pending else None
+
+    # Do not send the same approval set every cycle. register_approval_prompt
+    # suppresses unchanged prompts for 12h unless a new action appears.
+    if not executed and not approval_text:
+        return False
+
+    sections: list[str] = []
+    if executed:
+        lines=['🤖 Hermes — avancei nas suas prioridades', '', 'Concluí:']
+        for action in executed[:5]:
+            lines.append(f"- {action.get('title')}")
+        sections.append('\n'.join(lines))
+    if approval_text:
+        sections.append(approval_text)
+    return _send('\n\n'.join(sections))
 
 
 def tick() -> None:
