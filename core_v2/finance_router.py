@@ -46,11 +46,53 @@ def _clean_added_name(text: str, kind: str) -> str:
     return low.strip(' .,-:')
 
 
+def _local_time_request(text: str) -> bool:
+    """True when the user is clearly talking about Hermes agenda/reminders.
+
+    This guard is intentionally evaluated before finance mutations. Words such as
+    "água" can exist both in a reminder and in a financial item (for example
+    Água/Esgoto). A command like "cancele a rotina de água" must therefore never
+    be allowed to fuzzy-match and deactivate a financial account.
+    """
+    low = str(text or '').casefold()
+    temporal_terms = ('lembrete', 'lembretes', 'rotina', 'rotinas', 'agenda', 'evento', 'eventos', 'compromisso', 'compromissos')
+    if not any(term in low for term in temporal_terms):
+        return False
+
+    # Explicit cron/brief/job operations belong to the legacy cron router instead
+    # of the local Time Engine.
+    if any(term in low for term in (' cron', 'crons', ' job', 'jobs', 'brief', 'briefing')):
+        return False
+    return True
+
+
+def _handle_local_time_first(text: str) -> str | None:
+    if not _local_time_request(text):
+        return None
+    try:
+        from time_router import handle as handle_time
+
+        # Natural phrases such as "rotina de água antiga" are normalized to the
+        # content-bearing target expected by the local agenda resolver.
+        delegated = re.sub(r'\b(?:antiga|antigo|velha|velho)\b', '', text, flags=re.I)
+        delegated = re.sub(r'\b(rotina|lembrete|evento|compromisso)\s+de\s+', r'\1 ', delegated, flags=re.I)
+        delegated = re.sub(r'\s+', ' ', delegated).strip()
+        return handle_time(delegated)
+    except Exception:
+        # Never fall through into a destructive finance mutation after a failed
+        # temporal routing attempt.
+        return 'Não consegui alterar essa rotina com segurança agora. Nenhum dado financeiro foi modificado.'
+
+
 def handle(text: str) -> str | None:
     raw = (text or '').strip()
     if not raw:
         return None
     low = raw.casefold()
+
+    time_reply = _handle_local_time_first(raw)
+    if time_reply is not None:
+        return time_reply
 
     finance_terms = ('finance', 'financeiro', 'gasto', 'gastos', 'conta', 'contas', 'assinatura', 'assinaturas', 'salário', 'salario', 'renda')
     summary_terms = ('quanto gasto', 'quanto eu gasto', 'resumo financeiro', 'meus gastos', 'minhas contas', 'meu financeiro', 'situação financeira', 'situacao financeira')
