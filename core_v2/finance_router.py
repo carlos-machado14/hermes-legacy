@@ -35,32 +35,20 @@ def _extract_last_money(text: str) -> float | None:
 
 def _clean_added_name(text: str, kind: str) -> str:
     low = text
-    # remove verbo + artigo/tipo
     low = re.sub(r'^\s*(?:adicione|adicionar|inclua|incluir|coloque|registr[ea]|nova|novo)\s+', '', low, flags=re.I)
     if kind == 'subscription':
         low = re.sub(r'^\s*(?:uma\s+)?assinatura\s+(?:de\s+)?', '', low, flags=re.I)
     else:
         low = re.sub(r'^\s*(?:um|uma)?\s*(?:gasto|despesa|conta)\s+(?:mensal\s+)?(?:de\s+)?', '', low, flags=re.I)
-    # corta antes do valor
     low = re.split(r'\s+(?:de|por|no valor de|custando|custa)\s+R?\$?\s*\d', low, maxsplit=1, flags=re.I)[0]
     return low.strip(' .,-:')
 
 
 def _local_time_request(text: str) -> bool:
-    """True when the user is clearly talking about Hermes agenda/reminders.
-
-    This guard is intentionally evaluated before finance mutations. Words such as
-    "água" can exist both in a reminder and in a financial item (for example
-    Água/Esgoto). A command like "cancele a rotina de água" must therefore never
-    be allowed to fuzzy-match and deactivate a financial account.
-    """
     low = str(text or '').casefold()
     temporal_terms = ('lembrete', 'lembretes', 'rotina', 'rotinas', 'agenda', 'evento', 'eventos', 'compromisso', 'compromissos')
     if not any(term in low for term in temporal_terms):
         return False
-
-    # Explicit cron/brief/job operations belong to the legacy cron router instead
-    # of the local Time Engine.
     if any(term in low for term in (' cron', 'crons', ' job', 'jobs', 'brief', 'briefing')):
         return False
     return True
@@ -71,16 +59,11 @@ def _handle_local_time_first(text: str) -> str | None:
         return None
     try:
         from time_router import handle as handle_time
-
-        # Natural phrases such as "rotina de água antiga" are normalized to the
-        # content-bearing target expected by the local agenda resolver.
         delegated = re.sub(r'\b(?:antiga|antigo|velha|velho)\b', '', text, flags=re.I)
         delegated = re.sub(r'\b(rotina|lembrete|evento|compromisso)\s+de\s+', r'\1 ', delegated, flags=re.I)
         delegated = re.sub(r'\s+', ' ', delegated).strip()
         return handle_time(delegated)
     except Exception:
-        # Never fall through into a destructive finance mutation after a failed
-        # temporal routing attempt.
         return 'Não consegui alterar essa rotina com segurança agora. Nenhum dado financeiro foi modificado.'
 
 
@@ -89,6 +72,16 @@ def handle(text: str) -> str | None:
     if not raw:
         return None
     low = raw.casefold()
+
+    # A resposta numérica a uma pergunta de desambiguação precisa ser tratada
+    # antes de qualquer roteador tentar reinterpretar a mensagem.
+    try:
+        from ambiguity_router import resolve_pending
+        pending_reply = resolve_pending(raw)
+        if pending_reply is not None:
+            return pending_reply
+    except Exception:
+        pass
 
     time_reply = _handle_local_time_first(raw)
     if time_reply is not None:
@@ -101,22 +94,26 @@ def handle(text: str) -> str | None:
             return 'Ainda não existe um perfil financeiro estruturado local. Importe seus dados uma vez e depois posso mantê-los por conversa.'
         return summary()
 
-    # Renda/salário: exige palavra explícita + valor.
     if any(k in low for k in ('salário', 'salario', 'renda')) and any(k in low for k in ('agora', 'é ', 'e ', 'passou', 'foi para', 'atualize', 'atualiza')):
         value = _extract_last_money(raw)
         if value is not None:
             return set_income(value, source_text=raw)
 
-    # Encerrar/quitar/cancelar uma conta existente.
     deactivate_words = ('terminei de pagar', 'quitei', 'cancelei', 'cancelar', 'cancele', 'remova', 'remover', 'não pago mais', 'nao pago mais', 'encerrei')
     if any(k in low for k in deactivate_words):
         if not PROFILE.exists():
             return None
+        try:
+            from ambiguity_router import maybe_prompt
+            clarification = maybe_prompt(raw, intended_domain='finance', intended_action='deactivate')
+            if clarification is not None:
+                return clarification
+        except Exception:
+            pass
         reply = deactivate_item(raw)
         if reply is not None:
             return reply
 
-    # Reativar.
     if any(k in low for k in ('reative', 'reativar', 'voltei a pagar', 'ative novamente', 'ativar novamente')):
         if not PROFILE.exists():
             return None
@@ -124,7 +121,6 @@ def handle(text: str) -> str | None:
         if reply is not None:
             return reply
 
-    # Adicionar nova assinatura/gasto mensal.
     add_words = ('adicione', 'adicionar', 'inclua', 'incluir', 'coloque', 'registre', 'registrar', 'nova assinatura', 'novo gasto', 'nova conta')
     if any(k in low for k in add_words):
         value = _extract_last_money(raw)
@@ -135,7 +131,6 @@ def handle(text: str) -> str | None:
         if name:
             return add_item(name, value, kind=kind)
 
-    # Alterar valor de item existente: só age se houver perfil + valor + linguagem de alteração.
     update_words = ('agora é', 'agora e', 'foi para', 'passou para', 'mudou para', 'atualize', 'atualiza', 'corrija para', 'corrige para', 'está em', 'esta em')
     if PROFILE.exists() and any(k in low for k in update_words):
         value = _extract_last_money(raw)
@@ -144,7 +139,6 @@ def handle(text: str) -> str | None:
             if reply is not None:
                 return reply
 
-    # Não sequestra conversa financeira genérica; deixa o Hermes normal responder.
     if any(k in low for k in finance_terms):
         return None
     return None
