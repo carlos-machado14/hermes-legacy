@@ -15,6 +15,7 @@ sys.path.insert(0, str(CORE))
 import job_store
 from complexity_router import classify
 from temporal_parser import humanize, parse
+from time_router import _message
 from time_store import compute_next
 from web_research import _company_queries, _looks_generic
 
@@ -74,6 +75,15 @@ class TimeEngineParsingTests(unittest.TestCase):
         after = int(datetime(2026, 9, 15, 16, 52, tzinfo=ZoneInfo('America/Sao_Paulo')).timestamp())
         nxt = datetime.fromtimestamp(compute_next(rec, after, 'America/Sao_Paulo'), ZoneInfo('America/Sao_Paulo'))
         self.assertEqual((nxt.hour, nxt.minute), (17, 0))
+
+    def test_relative_time_removed_from_reminder_message(self):
+        self.assertEqual(_message('Me lembre daqui a 2 minutos de testar o Hermes'), 'testar o Hermes')
+
+    def test_monthly_time_removed_from_reminder_message(self):
+        self.assertEqual(
+            _message('Me lembre todo dia 28 do nosso aniversário de namoro'),
+            'nosso aniversário de namoro',
+        )
 
 
 class MultiFlowStoreTests(unittest.TestCase):
