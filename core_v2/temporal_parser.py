@@ -31,11 +31,16 @@ def norm(text: str) -> str:
 
 def _time_matches(text: str) -> list[tuple[int, int, int, int]]:
     t = norm(text)
-    out = []
-    for m in re.finditer(r'\b(?:as|a|at|por volta das)?\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)\b', t):
-        h = max(0, min(23, int(m.group(1))))
-        minute = max(0, min(59, int(m.group(2) or 0)))
-        out.append((h, minute, m.start(), m.end()))
+    out: list[tuple[int, int, int, int]] = []
+    pattern = re.compile(
+        r'\b(?:(?:as|a|at|por volta das)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?'
+        r'|(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?))\b'
+    )
+    for m in pattern.finditer(t):
+        hour = int(m.group(1) or m.group(3) or 0)
+        minute = int(m.group(2) or m.group(4) or 0)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            out.append((hour, minute, m.start(), m.end()))
     return out
 
 
@@ -49,24 +54,30 @@ def _clock(text: str, default: str = '09:00') -> str:
 
 def _window(text: str) -> tuple[str | None, str | None]:
     t = norm(text)
-    m = re.search(r'\b(?:das|de)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\s*(?:ate|a)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b', t)
+    m = re.search(
+        r'\b(?:das|de)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\s*'
+        r'(?:ate|a)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b',
+        t,
+    )
     if not m:
         return None, None
     sh, sm = int(m.group(1)), int(m.group(2) or 0)
     eh, em = int(m.group(3)), int(m.group(4) or 0)
-    return f'{max(0,min(23,sh)):02d}:{max(0,min(59,sm)):02d}', f'{max(0,min(23,eh)):02d}:{max(0,min(59,em)):02d}'
+    if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+        return None, None
+    return f'{sh:02d}:{sm:02d}', f'{eh:02d}:{em:02d}'
 
 
 def _weekdays(text: str) -> list[int] | None:
     t = norm(text)
-    if any(x in t for x in ('segunda a sexta', 'segunda-feira a sexta-feira', 'dias uteis', 'dias úteis')):
+    if any(x in t for x in ('segunda a sexta', 'segunda-feira a sexta-feira', 'dias uteis')):
         return [0, 1, 2, 3, 4]
     if any(x in t for x in ('fim de semana', 'finais de semana', 'sabado e domingo')):
         return [5, 6]
     found: list[int] = []
     for name, value in WEEKDAYS.items():
         n = norm(name)
-        if re.search(rf'\b(?:toda|todo|cada|na|no|as|às)?\s*{re.escape(n)}s?\b', t):
+        if re.search(rf'\b(?:toda|todo|cada|na|no)?\s*{re.escape(n)}s?\b', t):
             if value not in found:
                 found.append(value)
     return sorted(found) or None
@@ -76,29 +87,29 @@ def _relative_once(text: str, zone: ZoneInfo, now: datetime) -> datetime | None:
     t = norm(text)
     m = re.search(r'\b(?:daqui a|em)\s+(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b', t)
     if m and 'a cada' not in t:
-        value = int(m.group(1)); unit = m.group(2)
+        value, unit = int(m.group(1)), m.group(2)
         if 'minuto' in unit:
             return now + timedelta(minutes=value)
         if 'hora' in unit:
             return now + timedelta(hours=value)
         return now + timedelta(days=value)
+
     if 'amanha' in t:
-        d = (now + timedelta(days=1)).date(); hh, mm = map(int, _clock(text).split(':'))
+        d = (now + timedelta(days=1)).date()
+        hh, mm = map(int, _clock(text).split(':'))
         return datetime(d.year, d.month, d.day, hh, mm, tzinfo=zone)
     if 'hoje' in t:
-        d = now.date(); hh, mm = map(int, _clock(text).split(':'))
+        d = now.date()
+        hh, mm = map(int, _clock(text).split(':'))
         candidate = datetime(d.year, d.month, d.day, hh, mm, tzinfo=zone)
         return candidate if candidate > now else None
-    if any(x in t for x in ('essa semana', 'esta semana', 'nesta semana')):
-        days = (6 - now.weekday()) % 7
-        if days == 0 and now.hour >= 18:
-            days = 7
-        d = (now + timedelta(days=days)).date()
-        return datetime(d.year, d.month, d.day, 18, 0, tzinfo=zone)
+
     m = re.search(r'\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b', t)
     if m:
-        day, month = int(m.group(1)), int(m.group(2)); year = int(m.group(3) or now.year)
-        if year < 100: year += 2000
+        day, month = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3) or now.year)
+        if year < 100:
+            year += 2000
         hh, mm = map(int, _clock(text).split(':'))
         try:
             candidate = datetime(year, month, day, hh, mm, tzinfo=zone)
@@ -107,27 +118,25 @@ def _relative_once(text: str, zone: ZoneInfo, now: datetime) -> datetime | None:
             return candidate
         except ValueError:
             return None
+
     for name, wd in WEEKDAYS.items():
-        if re.search(rf'\b(?:na|no|nesta|neste|proxima|proximo|próxima|próximo)?\s*{re.escape(norm(name))}\b', t):
+        n = norm(name)
+        if re.search(rf'\b(?:na|no|nesta|neste|proxima|proximo)?\s*{re.escape(n)}\b', t):
             days = (wd - now.weekday()) % 7
             if days == 0:
                 days = 7
-            d = (now + timedelta(days=days)).date(); hh, mm = map(int, _clock(text).split(':'))
+            d = (now + timedelta(days=days)).date()
+            hh, mm = map(int, _clock(text).split(':'))
             return datetime(d.year, d.month, d.day, hh, mm, tzinfo=zone)
     return None
 
 
 def _yearly(text: str) -> dict[str, Any] | None:
     t = norm(text)
-    yearly = any(x in t for x in ('todo ano', 'todos os anos', 'anualmente', 'anual'))
-    if not yearly:
+    if not any(x in t for x in ('todo ano', 'todos os anos', 'anualmente', 'anual')):
         return None
     day_match = re.search(r'\bdia\s+(\d{1,2})\b', t)
-    month_num = None
-    for name, number in MONTHS.items():
-        if norm(name) in t:
-            month_num = number
-            break
+    month_num = next((number for name, number in MONTHS.items() if norm(name) in t), None)
     if not day_match or not month_num:
         return {'needs_clarification': 'Qual mês desse lembrete anual?'}
     return {'freq': 'yearly', 'month': month_num, 'day': int(day_match.group(1)), 'time': _clock(text)}
@@ -135,7 +144,9 @@ def _yearly(text: str) -> dict[str, Any] | None:
 
 def _monthly(text: str) -> dict[str, Any] | None:
     t = norm(text)
-    m = re.search(r'\b(?:todo|cada)\s+dia\s+(\d{1,2})\b', t) or re.search(r'\bdia\s+(\d{1,2})\s+de\s+cada\s+mes\b', t)
+    m = re.search(r'\b(?:todo|cada)\s+dia\s+(\d{1,2})\b', t)
+    if not m:
+        m = re.search(r'\bdia\s+(\d{1,2})\s+de\s+cada\s+mes\b', t)
     if m:
         return {'freq': 'monthly', 'day': max(1, min(31, int(m.group(1)))), 'time': _clock(text)}
     return None
@@ -162,20 +173,24 @@ def parse(text: str, *, timezone: str | None = None, now: datetime | None = None
 
     m = re.search(r'\ba cada\s+(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b', t)
     if m:
-        value = max(1, int(m.group(1))); unit = m.group(2)
+        value, unit = max(1, int(m.group(1))), m.group(2)
         minutes = value if 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
         start, end = _window(raw)
         weekdays = _weekdays(raw)
         recurrence: dict[str, Any] = {'freq': 'interval', 'minutes': minutes}
-        if start: recurrence['window_start'] = start
-        if end: recurrence['window_end'] = end
-        if weekdays is not None: recurrence['weekdays'] = weekdays
+        if start:
+            recurrence['window_start'] = start
+        if end:
+            recurrence['window_end'] = end
+        if weekdays is not None:
+            recurrence['weekdays'] = weekdays
         return {'timezone': zone_name, 'recurrence': recurrence, 'next_run_at': compute_next(recurrence, int(current.timestamp()), zone_name)}
 
     if any(x in t for x in ('todo dia', 'todos os dias', 'diariamente')):
         recurrence = {'freq': 'daily', 'time': _clock(raw)}
         weekdays = _weekdays(raw)
-        if weekdays is not None: recurrence['weekdays'] = weekdays
+        if weekdays is not None:
+            recurrence['weekdays'] = weekdays
         return {'timezone': zone_name, 'recurrence': recurrence, 'next_run_at': compute_next(recurrence, int(current.timestamp()), zone_name)}
 
     weekdays = _weekdays(raw)
@@ -203,7 +218,8 @@ def parse(text: str, *, timezone: str | None = None, now: datetime | None = None
                 return {'timezone': zone_name, 'recurrence': recurrence, 'next_run_at': int(candidate.timestamp())}
             month += 1
             if month == 13:
-                month = 1; year += 1
+                month = 1
+                year += 1
     return None
 
 
@@ -211,7 +227,7 @@ def extract_alert_offsets(text: str) -> list[int]:
     t = norm(text)
     out: list[int] = []
     for m in re.finditer(r'\b(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\s+antes\b', t):
-        value = int(m.group(1)); unit = m.group(2)
+        value, unit = int(m.group(1)), m.group(2)
         minutes = value if 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
         if minutes not in out:
             out.append(minutes)
@@ -225,13 +241,20 @@ def humanize(recurrence: dict[str, Any]) -> str:
         cadence = f'a cada {minutes} min' if minutes < 60 or minutes % 60 else f'a cada {minutes // 60} h'
         if recurrence.get('window_start') and recurrence.get('window_end'):
             cadence += f" das {recurrence['window_start']} às {recurrence['window_end']}"
-        if recurrence.get('weekdays') == [0,1,2,3,4]: cadence += ' de segunda a sexta'
+        if recurrence.get('weekdays') == [0, 1, 2, 3, 4]:
+            cadence += ' de segunda a sexta'
         return cadence
-    if freq == 'daily': return f"todos os dias às {recurrence.get('time','09:00')}"
-    if freq == 'weekly': return f"semanalmente às {recurrence.get('time','09:00')}"
-    if freq == 'monthly': return f"todo dia {recurrence.get('day')} às {recurrence.get('time','09:00')}"
-    if freq == 'yearly': return f"todo ano em {int(recurrence.get('day')):02d}/{int(recurrence.get('month')):02d} às {recurrence.get('time','09:00')}"
+    if freq == 'daily':
+        return f"todos os dias às {recurrence.get('time', '09:00')}"
+    if freq == 'weekly':
+        return f"semanalmente às {recurrence.get('time', '09:00')}"
+    if freq == 'monthly':
+        return f"todo dia {recurrence.get('day')} às {recurrence.get('time', '09:00')}"
+    if freq == 'yearly':
+        return f"todo ano em {int(recurrence.get('day')):02d}/{int(recurrence.get('month')):02d} às {recurrence.get('time', '09:00')}"
     if freq == 'once':
-        try: return datetime.fromisoformat(str(recurrence.get('at'))).strftime('%d/%m/%Y %H:%M')
-        except Exception: return str(recurrence.get('at') or 'uma vez')
+        try:
+            return datetime.fromisoformat(str(recurrence.get('at'))).strftime('%d/%m/%Y %H:%M')
+        except Exception:
+            return str(recurrence.get('at') or 'uma vez')
     return str(recurrence)
