@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import signal
@@ -8,7 +9,7 @@ import time
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, IO
 
 from delivery import send_telegram
 from temporal_parser import parse
@@ -18,13 +19,37 @@ ROOT = Path.home() / '.hermes' / 'core-v2'
 STATE = ROOT / 'state'
 LEGACY = STATE / 'managed_crons.json'
 LOG = ROOT / 'logs' / 'time-engine.log'
+LOCK = STATE / 'time-engine.lock'
 RUNNING = True
+_LOCK_HANDLE: IO[str] | None = None
 
 
 def _log(message: str) -> None:
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with LOG.open('a', encoding='utf-8') as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+
+
+def _acquire_singleton() -> bool:
+    """Guarantee only one Time Engine process can deliver reminders.
+
+    systemd already provides one service process, but this also protects against a
+    manually started copy, a stale upgrade process or overlapping service starts.
+    """
+    global _LOCK_HANDLE
+    STATE.mkdir(parents=True, exist_ok=True)
+    handle = LOCK.open('a+', encoding='utf-8')
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return False
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(Path('/proc/self').resolve()))
+    handle.flush()
+    _LOCK_HANDLE = handle
+    return True
 
 
 def _stop(*_args: Any) -> None:
@@ -48,12 +73,21 @@ def _format_occurrence(item: dict[str, Any]) -> str:
 
 def _deliver(occ: dict[str, Any]) -> None:
     item = occ.get('schedule') or {}
+    occurrence_id = str(occ['id'])
     if not item:
-        mark_delivery(str(occ['id']), ok=False, error='schedule_missing')
+        mark_delivery(occurrence_id, ok=False, error='schedule_missing')
         return
-    ok, error = send_telegram(_format_occurrence(item), attempts=2)
-    mark_delivery(str(occ['id']), ok=ok, error=error)
-    _log(f"occurrence={occ.get('id')} schedule={item.get('id')} ok={ok} error={error[:120] if error else ''}")
+
+    # Notification delivery is intentionally a single Telegram send attempt. The
+    # Bot API has no idempotency key; retrying an ambiguous read/write timeout can
+    # create duplicate messages even when Telegram accepted the first request.
+    ok, error = send_telegram(_format_occurrence(item), attempts=1)
+    mark_delivery(occurrence_id, ok=ok, error=error)
+    state = 'delivered' if ok else ('ambiguous' if error.startswith('ambiguous_delivery:') else 'retry')
+    _log(
+        f"occurrence={occ.get('id')} schedule={item.get('id')} state={state} "
+        f"ok={ok} error={error[:160] if error else ''}"
+    )
 
 
 def _already_migrated(legacy_id: str) -> bool:
@@ -72,11 +106,14 @@ def _legacy_parse(schedule: str, message: str) -> dict[str, Any] | None:
         synthetic = f'a cada {m.group(1)} minutos {message}'
     else:
         m = re.fullmatch(r'every\s+(\d+)h', s)
-        if m: synthetic = f'a cada {m.group(1)} horas {message}'
+        if m:
+            synthetic = f'a cada {m.group(1)} horas {message}'
         m = re.fullmatch(r'every\s+day\s+at\s+(\d{2}:\d{2})', s)
-        if m: synthetic = f'todo dia às {m.group(1)}h {message}'
+        if m:
+            synthetic = f'todo dia às {m.group(1)}h {message}'
         m = re.fullmatch(r'weekdays\s+at\s+(\d{2}:\d{2})', s)
-        if m: synthetic = f'de segunda a sexta às {m.group(1)}h {message}'
+        if m:
+            synthetic = f'de segunda a sexta às {m.group(1)}h {message}'
     return parse(synthetic)
 
 
@@ -100,7 +137,9 @@ def migrate_legacy_reminders() -> int:
                 str(task.get('name') or f'Lembrete - {message[:60]}'),
                 message,
                 parsed['recurrence'],
-                kind='reminder', timezone=parsed.get('timezone'), source='legacy-cron-migration',
+                kind='reminder',
+                timezone=parsed.get('timezone'),
+                source='legacy-cron-migration',
                 metadata={'legacy_cron_id': str(legacy_id), 'legacy_schedule': task.get('schedule')},
             )
             hermes = shutil.which('hermes') or str(Path.home() / '.local/bin/hermes')
@@ -118,12 +157,22 @@ def migrate_legacy_reminders() -> int:
 
 def tick() -> None:
     for occ in failed_for_retry(limit=30):
+        error = str(occ.get('last_error') or '')
+        if error.startswith('ambiguous_delivery:'):
+            # At-most-once policy for uncertain Telegram outcomes. Retrying here
+            # could duplicate a message that Telegram already accepted.
+            continue
         _deliver(occ)
     for occ in claim_due(limit=50):
         _deliver(occ)
 
 
 def main() -> int:
+    if not _acquire_singleton():
+        _log('time-engine duplicate process refused by singleton lock')
+        print('Hermes Time Engine já está ativo; processo duplicado encerrado.', flush=True)
+        return 0
+
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     migrated = migrate_legacy_reminders()
