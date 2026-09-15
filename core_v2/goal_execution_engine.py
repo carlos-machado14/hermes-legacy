@@ -20,6 +20,7 @@ EXTERNAL_WORDS = ('enviar','mande','mandar','publicar','postar','contatar','cont
 RESEARCH_WORDS = ('pesquisar','pesquise','pesquisa','pesquisa de mercado','buscar','busca','encontrar','mapear','mapeamento','levantar','levantamento','procurar','coletar dados','prospecção','prospeccao')
 DRAFT_WORDS = ('proposta','rascunho','copy','mensagem','oferta','roteiro','script','abordagem')
 ANALYSIS_WORDS = ('analisar','análise','analise','comparar','comparação','comparacao','priorizar','avaliar','avaliação','avaliacao','organizar','planejar','definir','revisar','salvar empresa como lead','acompanhar resposta')
+REJECTION_COOLDOWN_SECONDS = 7 * 24 * 3600
 
 
 def classify_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +51,19 @@ def classify_task(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _already_queued(task_id: str) -> bool:
-    return any(a.get('task_id') == task_id and a.get('status') not in {'done','failed','rejected'} for a in list_actions(None, 1000))
+    now = int(time.time())
+    for action in list_actions(None, 1000):
+        if action.get('task_id') != task_id:
+            continue
+        status = str(action.get('status') or '')
+        if status == 'rejected':
+            rejected_at = int(action.get('rejected_at') or action.get('updated_at') or 0)
+            if rejected_at and now - rejected_at < REJECTION_COOLDOWN_SECONDS:
+                return True
+            continue
+        if status not in {'done','failed'}:
+            return True
+    return False
 
 
 def propose_from_context(limit: int = 5) -> list[dict[str, Any]]:
