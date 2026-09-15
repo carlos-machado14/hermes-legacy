@@ -57,9 +57,6 @@ def _message(text: str) -> str:
             cleaned = candidate
             break
 
-    # When the time expression comes immediately after "me lembre", remove it
-    # from the human message. Example: "daqui a 2 minutos de testar o Hermes"
-    # must become simply "testar o Hermes".
     leading_temporal = [
         r'^(?:daqui\s+a|em)\s+\d+\s+(?:minutos?|horas?|dias?)\s+(?:de\s+)?',
         r'^(?:hoje|amanhã|amanha)(?:\s+(?:às?|as)\s+\d{1,2}(?::\d{2})?\s*(?:h|horas?)?)?\s+(?:de\s+)?',
@@ -145,9 +142,10 @@ def _resolve_target(text: str) -> str | None:
     m = re.search(r'\b([0-9a-f]{6,16})\b', t, re.I)
     if m:
         return m.group(1)
-    m = re.search(r'(?:lembrete|rotina|evento|compromisso)\s+["\']?(.+?)["\']?$', t, re.I)
+    m = re.search(r'(?:lembrete|rotina|evento|compromisso)\s+(?:de\s+)?["\']?(.+?)["\']?$', t, re.I)
     if m:
-        candidate = m.group(1).strip(" .'\"")
+        candidate = re.sub(r'\b(?:antiga|antigo|velha|velho)\b', '', m.group(1), flags=re.I)
+        candidate = re.sub(r'\s+', ' ', candidate).strip(" .'\"")
         for item in list_schedules(status='active', limit=100):
             if candidate.casefold() in str(item.get('title') or '').casefold() or candidate.casefold() in str(item.get('message') or '').casefold():
                 return str(item['id'])
@@ -263,6 +261,13 @@ def handle(text: str) -> str | None:
         ref = _resolve_target(raw)
         if not ref:
             return 'Qual lembrete ou rotina você quer pausar?'
+        try:
+            from ambiguity_router import maybe_prompt
+            clarification = maybe_prompt(raw, intended_domain='time', intended_action='pause', intended_target_id=ref)
+            if clarification is not None:
+                return clarification
+        except Exception:
+            pass
         item = pause(ref)
         return f"⏸️ Pausado: {item.get('message')}"
     if any(t.startswith(x) for x in ('retome ', 'retomar ', 'continue ')) and any(x in t for x in ('lembrete', 'rotina', 'evento', 'compromisso')):
@@ -275,6 +280,13 @@ def handle(text: str) -> str | None:
         ref = _resolve_target(raw)
         if not ref:
             return 'Qual lembrete ou rotina você quer remover?'
+        try:
+            from ambiguity_router import maybe_prompt
+            clarification = maybe_prompt(raw, intended_domain='time', intended_action='remove', intended_target_id=ref)
+            if clarification is not None:
+                return clarification
+        except Exception:
+            pass
         item = remove(ref)
         return f"🗑️ Removido da agenda: {item.get('message')}"
 
