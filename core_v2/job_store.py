@@ -11,6 +11,9 @@ from typing import Any
 ROOT = Path.home() / '.hermes' / 'core-v2'
 DB_PATH = ROOT / 'state' / 'jobs.sqlite3'
 
+# IMPORTANT: indexes that depend on columns introduced by migrations are created
+# only after ALTER TABLE runs. Existing Hermes installations may already have a
+# jobs.sqlite3 created by an older version without source_* / notified_at.
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
@@ -38,9 +41,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   output TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_notify ON jobs(status, notified_at);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_job ON checkpoints(job_id, step_index);
 '''
 
 _EXTRA_COLUMNS = {
@@ -50,18 +50,31 @@ _EXTRA_COLUMNS = {
     'notified_at': 'INTEGER',
 }
 
+_INDEXES = (
+    'CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)',
+    'CREATE INDEX IF NOT EXISTS idx_jobs_notify ON jobs(status, notified_at)',
+    'CREATE INDEX IF NOT EXISTS idx_checkpoints_job ON checkpoints(job_id, step_index)',
+)
+
 
 def _conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    cols = {str(r['name']) for r in conn.execute('PRAGMA table_info(jobs)').fetchall()}
-    for name, ddl in _EXTRA_COLUMNS.items():
-        if name not in cols:
-            conn.execute(f'ALTER TABLE jobs ADD COLUMN {name} {ddl}')
-    conn.commit()
-    return conn
+    try:
+        conn.executescript(SCHEMA)
+        cols = {str(r['name']) for r in conn.execute('PRAGMA table_info(jobs)').fetchall()}
+        for name, ddl in _EXTRA_COLUMNS.items():
+            if name not in cols:
+                conn.execute(f'ALTER TABLE jobs ADD COLUMN {name} {ddl}')
+        # Create dependent indexes only after the legacy schema has been upgraded.
+        for statement in _INDEXES:
+            conn.execute(statement)
+        conn.commit()
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def create_job(request: str, title: str | None = None, *, source_platform: str | None = None,
