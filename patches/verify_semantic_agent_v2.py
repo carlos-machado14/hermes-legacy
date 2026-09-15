@@ -48,6 +48,20 @@ def main() -> int:
     if not routed or routed.get('intent') != 'research' or routed.get('requires_confirmation'):
         fail('pesquisa pontual não foi entendida semanticamente')
 
+    def llm_bad_missing(*args, **kwargs):
+        return '{"intent":"research","confidence":0.98,"goal":"achar um cliente potencial","needs_tools":true,"capabilities":["web.search"],"requires_confirmation":false,"missing":["tarefas pendentes","recursos locais"],"reason":"pesquisa"}'
+
+    routed = agent.interpret('Quero encontrar um possível cliente aqui na região', llm_bad_missing)
+    if not routed or routed.get('missing'):
+        fail('semantic agent ainda repassa detalhes internos como missing')
+
+    def llm_valid_missing(*args, **kwargs):
+        return '{"intent":"research","confidence":0.98,"goal":"achar um cliente potencial","needs_tools":true,"capabilities":["web.search"],"requires_confirmation":false,"missing":["qual cidade ou região devo pesquisar"],"reason":"localização indispensável"}'
+
+    routed = agent.interpret('Quero um cliente aqui na região', llm_valid_missing)
+    if not routed or not routed.get('missing') or 'cidade' not in routed['missing'][0].casefold():
+        fail('semantic agent removeu uma clarificação humana realmente necessária')
+
     def llm_cron_query(*args, **kwargs):
         return '{"intent":"cron_query","confidence":0.97,"goal":"verificar rotina existente","needs_tools":true,"capabilities":[],"requires_confirmation":false,"missing":[],"reason":"consulta"}'
 
@@ -64,6 +78,7 @@ def main() -> int:
 
     print('OK: Semantic Agent V2 validado')
     print('OK: pesquisa pontual != cron; consulta de cron reconhecida; mutação exige confirmação')
+    print('OK: detalhes internos nunca viram perguntas ao usuário; clarificações humanas essenciais são preservadas')
     print('OK: contexto por chat + SLA ampliado + fallback legado preservados')
     return 0
 
