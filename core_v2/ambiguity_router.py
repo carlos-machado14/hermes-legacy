@@ -11,7 +11,10 @@ from typing import Any
 
 STATE = Path.home() / '.hermes' / 'core-v2' / 'state'
 PENDING_FILE = STATE / 'pending_choices.json'
+CHANNEL_FILE = STATE / 'channel_state.json'
 TTL_SECONDS = 15 * 60
+APPROVAL_TTL_SECONDS = 24 * 3600
+APPROVAL_REMIND_SECONDS = 12 * 3600
 
 
 def _norm(text: str) -> str:
@@ -26,6 +29,19 @@ def _source_key() -> str:
     chat_id = (os.getenv('HERMES_SOURCE_CHAT_ID') or '').strip()
     user_id = (os.getenv('HERMES_SOURCE_USER_ID') or '').strip()
     return f'{platform}:{chat_id or user_id or "default"}'
+
+
+def _channel_key() -> str:
+    try:
+        row = json.loads(CHANNEL_FILE.read_text(encoding='utf-8'))
+        if isinstance(row, dict):
+            platform = str(row.get('platform') or 'telegram').strip().lower()
+            chat_id = str(row.get('chat_id') or row.get('user_id') or '').strip()
+            if chat_id:
+                return f'{platform}:{chat_id}'
+    except Exception:
+        pass
+    return 'telegram:default'
 
 
 def _load() -> dict[str, Any]:
@@ -169,7 +185,6 @@ def maybe_prompt(
             if item['domain'] == intended_domain:
                 item['action'] = intended_action
 
-    # Only ask when there really is ambiguity: multiple viable targets or multiple domains.
     if len(candidates) <= 1:
         return None
     domains = {str(item.get('domain')) for item in candidates}
@@ -238,7 +253,7 @@ def resolve_pending(text: str) -> str | None:
     data = _load()
     key = _source_key()
     pending = data.get(key)
-    if not isinstance(pending, dict):
+    if not isinstance(pending, dict) or pending.get('type') == 'approval':
         return None
 
     low = _norm(text)
@@ -259,3 +274,234 @@ def resolve_pending(text: str) -> str | None:
     data.pop(key, None)
     _save(data)
     return _execute(option)
+
+
+def _approval_storage_key(*, from_channel: bool = False) -> str:
+    source = _channel_key() if from_channel else _source_key()
+    return f'approval::{source}'
+
+
+def _approval_live(ids: list[str]) -> list[dict[str, Any]]:
+    from action_queue import get_action
+    rows = []
+    for ref in ids:
+        action = get_action(ref)
+        if action and action.get('status') == 'pending_approval':
+            rows.append(action)
+    return rows
+
+
+def _approval_detail(action: dict[str, Any], index: int | None = None) -> str:
+    prefix = f'{index}. ' if index is not None else ''
+    return (
+        f"{prefix}{action.get('title')}\n"
+        f"   ID: {action.get('id')} | tipo: {action.get('kind') or 'ação'} | risco: {action.get('risk') or 'desconhecido'}"
+    )
+
+
+def _approval_root(actions: list[dict[str, Any]]) -> str:
+    if len(actions) == 1:
+        return (
+            '🤖 Hermes — preciso da sua decisão\n\n'
+            + _approval_detail(actions[0])
+            + '\n\n1. Aprovar e continuar\n2. Recusar\n3. Ver detalhes\n4. Decidir depois\n\n'
+            + 'Responda apenas com o número.'
+        )
+    lines = ['🤖 Hermes — preciso da sua decisão', '', 'Há ações aguardando aprovação:']
+    for index, action in enumerate(actions, 1):
+        lines.append(f"{index}. {action.get('title')} [{action.get('id')}]")
+    lines += [
+        '', 'O que deseja fazer?',
+        '1. Aprovar todas e continuar',
+        '2. Recusar todas',
+        '3. Revisar uma por uma',
+        '4. Ver detalhes de todas',
+        '5. Decidir depois',
+        '', 'Responda apenas com o número.',
+    ]
+    return '\n'.join(lines)
+
+
+def register_approval_prompt(actions: list[dict[str, Any]]) -> str | None:
+    pending = [a for a in actions if a.get('status') == 'pending_approval']
+    ids = list(dict.fromkeys(str(a.get('id')) for a in pending if a.get('id')))
+    if not ids:
+        return None
+    data = _load()
+    key = _approval_storage_key(from_channel=True)
+    now = int(time.time())
+    existing = data.get(key) if isinstance(data.get(key), dict) else None
+    if existing:
+        previous = [str(x) for x in existing.get('action_ids') or []]
+        if previous == ids and now - int(existing.get('notified_at') or 0) < APPROVAL_REMIND_SECONDS:
+            return None
+    data[key] = {
+        'type': 'approval',
+        'action_ids': ids,
+        'mode': 'root',
+        'selected_id': None,
+        'created_at': now,
+        'notified_at': now,
+        'expires_at': now + APPROVAL_TTL_SECONDS,
+    }
+    _save(data)
+    return _approval_root(pending)
+
+
+def _approval_refresh(data: dict[str, Any], key: str, row: dict[str, Any]) -> list[dict[str, Any]]:
+    live = _approval_live([str(x) for x in row.get('action_ids') or []])
+    if live:
+        row['action_ids'] = [str(x.get('id')) for x in live]
+        row['expires_at'] = int(time.time()) + APPROVAL_TTL_SECONDS
+        data[key] = row
+    else:
+        data.pop(key, None)
+    _save(data)
+    return live
+
+
+def _approval_apply(action: dict[str, Any], approve_it: bool) -> str:
+    if approve_it:
+        from goal_execution_engine import approve_and_execute
+        updated = approve_and_execute(str(action['id']))
+        result = str(updated.get('result') or '').strip()
+        return f"✅ Aprovado: {action.get('title')}" + (f'\n{result}' if result else '')
+    from action_queue import reject
+    reject(str(action['id']))
+    return f"❌ Recusado: {action.get('title')}"
+
+
+def _approval_details(actions: list[dict[str, Any]]) -> str:
+    lines = ['🔎 Detalhes das ações aguardando aprovação:']
+    for index, action in enumerate(actions, 1):
+        lines += ['', _approval_detail(action, index)]
+    return '\n'.join(lines)
+
+
+def _approval_pick(actions: list[dict[str, Any]]) -> str:
+    lines = ['Qual ação você quer revisar?']
+    for index, action in enumerate(actions, 1):
+        lines.append(f"{index}. {action.get('title')} [{action.get('id')}]")
+    lines += ['0. Voltar', '', 'Responda apenas com o número.']
+    return '\n'.join(lines)
+
+
+def _approval_action_menu(action: dict[str, Any]) -> str:
+    return (
+        f"Você escolheu:\n{action.get('title')} [{action.get('id')}]\n\n"
+        '1. Aprovar e continuar\n2. Recusar\n3. Ver detalhes\n4. Voltar\n\n'
+        'Responda apenas com o número.'
+    )
+
+
+def resolve_approval_pending(text: str) -> str | None:
+    data = _load()
+    key = _approval_storage_key()
+    row = data.get(key)
+    if not isinstance(row, dict):
+        approval_keys = [k for k, value in data.items() if k.startswith('approval::') and isinstance(value, dict)]
+        if len(approval_keys) == 1:
+            key = approval_keys[0]
+            row = data[key]
+        else:
+            return None
+
+    actions = _approval_refresh(data, key, row)
+    if not actions:
+        return None
+    row = data.get(key)
+    if not isinstance(row, dict):
+        return None
+
+    low = _norm(text)
+    direct = re.fullmatch(r'(aprovar|aprove|rejeitar|recusar|recuse)\s+([0-9a-f]{4,16})', low)
+    if direct:
+        ref = direct.group(2)
+        action = next((a for a in actions if str(a.get('id') or '').startswith(ref)), None)
+        if not action:
+            return 'Não encontrei essa ação entre as aprovações pendentes.'
+        reply = _approval_apply(action, direct.group(1).startswith(('aprov', 'aprove')))
+        remaining = _approval_refresh(data, key, row)
+        if remaining:
+            reply += f'\n\nAinda há {len(remaining)} ação(ões) aguardando sua decisão.'
+        return reply
+
+    if low in {'depois', 'deixa para depois', 'deixe para depois'}:
+        row['mode'] = 'deferred'; row['notified_at'] = int(time.time()); data[key] = row; _save(data)
+        return 'Certo. Não executei nada. Essas ações continuam aguardando sua aprovação.'
+
+    match = re.fullmatch(r'(?:opcao\s*)?(\d+)', low)
+    if not match:
+        return None
+    choice = int(match.group(1))
+    mode = str(row.get('mode') or 'root')
+
+    if mode == 'deferred':
+        row['mode'] = 'root'; data[key] = row; _save(data)
+        return _approval_root(actions)
+
+    if mode == 'root':
+        if len(actions) == 1:
+            action = actions[0]
+            if choice == 1:
+                reply = _approval_apply(action, True); _approval_refresh(data, key, row); return reply
+            if choice == 2:
+                reply = _approval_apply(action, False); _approval_refresh(data, key, row); return reply
+            if choice == 3:
+                return _approval_details(actions) + '\n\n' + _approval_action_menu(action)
+            if choice == 4:
+                row['mode'] = 'deferred'; row['notified_at'] = int(time.time()); data[key] = row; _save(data)
+                return 'Certo. Não executei nada. Posso lembrar novamente mais tarde.'
+            return 'Escolha 1, 2, 3 ou 4.'
+
+        if choice == 1:
+            replies = [_approval_apply(action, True) for action in actions]
+            _approval_refresh(data, key, row)
+            return '\n'.join(replies)
+        if choice == 2:
+            replies = [_approval_apply(action, False) for action in actions]
+            _approval_refresh(data, key, row)
+            return '\n'.join(replies)
+        if choice == 3:
+            row['mode'] = 'pick'; data[key] = row; _save(data)
+            return _approval_pick(actions)
+        if choice == 4:
+            return _approval_details(actions) + '\n\n' + _approval_root(actions)
+        if choice == 5:
+            row['mode'] = 'deferred'; row['notified_at'] = int(time.time()); data[key] = row; _save(data)
+            return 'Certo. Não executei nada. Essas ações continuam aguardando sua aprovação.'
+        return 'Escolha um número entre 1 e 5.'
+
+    if mode == 'pick':
+        if choice == 0:
+            row['mode'] = 'root'; row['selected_id'] = None; data[key] = row; _save(data)
+            return _approval_root(actions)
+        if choice < 1 or choice > len(actions):
+            return f'Escolha um número entre 1 e {len(actions)}, ou 0 para voltar.'
+        action = actions[choice - 1]
+        row['mode'] = 'action'; row['selected_id'] = str(action['id']); data[key] = row; _save(data)
+        return _approval_action_menu(action)
+
+    if mode == 'action':
+        selected = str(row.get('selected_id') or '')
+        action = next((a for a in actions if str(a.get('id') or '') == selected), None)
+        if not action:
+            row['mode'] = 'pick'; row['selected_id'] = None; data[key] = row; _save(data)
+            return _approval_pick(actions)
+        if choice in {1, 2}:
+            reply = _approval_apply(action, choice == 1)
+            remaining = _approval_refresh(data, key, row)
+            if remaining:
+                current = data.get(key) or row
+                current['mode'] = 'pick'; current['selected_id'] = None; data[key] = current; _save(data)
+                reply += '\n\n' + _approval_pick(remaining)
+            return reply
+        if choice == 3:
+            return _approval_details([action]) + '\n\n' + _approval_action_menu(action)
+        if choice == 4:
+            row['mode'] = 'pick'; row['selected_id'] = None; data[key] = row; _save(data)
+            return _approval_pick(actions)
+        return 'Escolha 1, 2, 3 ou 4.'
+
+    row['mode'] = 'root'; data[key] = row; _save(data)
+    return _approval_root(actions)
