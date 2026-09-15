@@ -13,6 +13,7 @@ CORE = ROOT / 'core_v2'
 sys.path.insert(0, str(CORE))
 
 import job_store
+import time_store
 from complexity_router import classify
 from temporal_parser import humanize, parse
 from time_router import _message
@@ -85,6 +86,63 @@ class TimeEngineParsingTests(unittest.TestCase):
             _message('Me lembre todo dia 28 do nosso aniversário de namoro'),
             'do nosso aniversário de namoro',
         )
+
+
+class TimeStoreIdempotencyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_db = time_store.DB_PATH
+        time_store.DB_PATH = Path(self.tmp.name) / 'assistant.sqlite3'
+
+    def tearDown(self):
+        time_store.DB_PATH = self.old_db
+        self.tmp.cleanup()
+
+    def test_once_with_microseconds_finishes_after_first_occurrence(self):
+        zone = ZoneInfo('America/Sao_Paulo')
+        recurrence = {'freq': 'once', 'at': '2026-09-15T13:48:43.637622-03:00'}
+        before = int(datetime(2026, 9, 15, 13, 46, 43, tzinfo=zone).timestamp())
+        due = time_store.compute_next(recurrence, before, 'America/Sao_Paulo')
+        self.assertIsNotNone(due)
+        self.assertIsNone(time_store.compute_next(recurrence, due, 'America/Sao_Paulo'))
+
+    def test_claim_due_never_returns_same_occurrence_twice(self):
+        zone = ZoneInfo('America/Sao_Paulo')
+        recurrence = {'freq': 'once', 'at': '2026-09-15T13:48:43.637622-03:00'}
+        before = int(datetime(2026, 9, 15, 13, 46, 43, tzinfo=zone).timestamp())
+        due = time_store.compute_next(recurrence, before, 'America/Sao_Paulo')
+        self.assertIsNotNone(due)
+
+        with time_store._conn() as conn:
+            conn.execute(
+                '''INSERT INTO schedules(
+                    id,title,kind,message,timezone,recurrence_json,status,next_run_at,
+                    snoozed_until,source,parent_id,metadata_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?, 'active', ?,NULL,?,NULL,'{}',?,?)''',
+                (
+                    'once-test', 'Lembrete - teste', 'reminder', 'teste',
+                    'America/Sao_Paulo',
+                    '{"freq":"once","at":"2026-09-15T13:48:43.637622-03:00"}',
+                    due, 'test', before, before,
+                ),
+            )
+
+        first = time_store.claim_due(now=due)
+        self.assertEqual(len(first), 1)
+        occurrence_id = first[0]['id']
+        time_store.mark_delivery(occurrence_id, ok=True)
+
+        second = time_store.claim_due(now=due + 20)
+        third = time_store.claim_due(now=due + 60)
+        self.assertEqual(second, [])
+        self.assertEqual(third, [])
+
+        schedule = time_store.get_schedule('once-test')
+        self.assertEqual(schedule['status'], 'completed')
+        self.assertIsNone(schedule['next_run_at'])
+        with sqlite3.connect(time_store.DB_PATH) as conn:
+            rows = conn.execute('SELECT status,attempts FROM schedule_occurrences WHERE schedule_id=?', ('once-test',)).fetchall()
+        self.assertEqual(rows, [('delivered', 1)])
 
 
 class MultiFlowStoreTests(unittest.TestCase):
