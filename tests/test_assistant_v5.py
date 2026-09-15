@@ -13,6 +13,7 @@ CORE = ROOT / 'core_v2'
 sys.path.insert(0, str(CORE))
 
 import job_store
+import time_service
 import time_store
 from complexity_router import classify
 from temporal_parser import humanize, parse
@@ -143,6 +144,63 @@ class TimeStoreIdempotencyTests(unittest.TestCase):
         with sqlite3.connect(time_store.DB_PATH) as conn:
             rows = conn.execute('SELECT status,attempts FROM schedule_occurrences WHERE schedule_id=?', ('once-test',)).fetchall()
         self.assertEqual(rows, [('delivered', 1)])
+
+
+class LegacyReminderDedupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_store_db = time_store.DB_PATH
+        self.old_service_db = time_service.DB_PATH
+        db = Path(self.tmp.name) / 'assistant.sqlite3'
+        time_store.DB_PATH = db
+        time_service.DB_PATH = db
+        with time_store._conn():
+            pass
+
+    def tearDown(self):
+        time_store.DB_PATH = self.old_store_db
+        time_service.DB_PATH = self.old_service_db
+        self.tmp.cleanup()
+
+    def test_duplicate_legacy_schedules_are_cancelled_but_natural_schedule_is_preserved(self):
+        recurrence = '{"freq":"daily","time":"08:00"}'
+        with sqlite3.connect(time_store.DB_PATH) as conn:
+            for index in range(3):
+                conn.execute(
+                    '''INSERT INTO schedules(
+                        id,title,kind,message,timezone,recurrence_json,status,next_run_at,
+                        snoozed_until,source,parent_id,metadata_json,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?, 'active', ?,NULL,?,NULL,'{}',?,?)''',
+                    (
+                        f'legacy-{index}', 'Água', 'reminder', 'Beber água',
+                        'America/Sao_Paulo', recurrence, 1000 + index,
+                        'legacy-cron-migration', 100 + index, 100 + index,
+                    ),
+                )
+            conn.execute(
+                '''INSERT INTO schedules(
+                    id,title,kind,message,timezone,recurrence_json,status,next_run_at,
+                    snoozed_until,source,parent_id,metadata_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?, 'active', ?,NULL,?,NULL,'{}',?,?)''',
+                (
+                    'natural-1', 'Água manual', 'reminder', 'Beber água',
+                    'America/Sao_Paulo', recurrence, 1000,
+                    'natural-language', 200, 200,
+                ),
+            )
+            conn.commit()
+
+        cancelled = time_service._dedupe_legacy_schedules()
+        self.assertEqual(cancelled, 2)
+
+        with sqlite3.connect(time_store.DB_PATH) as conn:
+            legacy = conn.execute(
+                "SELECT status,COUNT(*) FROM schedules WHERE source='legacy-cron-migration' GROUP BY status"
+            ).fetchall()
+            natural = conn.execute("SELECT status FROM schedules WHERE id='natural-1'").fetchone()[0]
+        self.assertIn(('active', 1), legacy)
+        self.assertIn(('cancelled', 2), legacy)
+        self.assertEqual(natural, 'active')
 
 
 class MultiFlowStoreTests(unittest.TestCase):
