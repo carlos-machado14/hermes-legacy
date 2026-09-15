@@ -73,6 +73,15 @@ def handle(text: str) -> str | None:
         return None
     low = raw.casefold()
 
+    # Conversas interativas pendentes sempre ganham prioridade sobre domínios.
+    try:
+        from ambiguity_router import resolve_approval_pending
+        approval_reply = resolve_approval_pending(raw)
+        if approval_reply is not None:
+            return approval_reply
+    except Exception:
+        pass
+
     try:
         from ambiguity_router import resolve_pending
         pending_reply = resolve_pending(raw)
