@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -10,9 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / 'core_v2'
 sys.path.insert(0, str(CORE))
 
+import job_store
 from complexity_router import classify
 from temporal_parser import humanize, parse
 from time_store import compute_next
+from web_research import _company_queries, _looks_generic
 
 
 class ComplexityV5Tests(unittest.TestCase):
@@ -42,13 +45,18 @@ class TimeEngineParsingTests(unittest.TestCase):
         self.assertEqual(rec['minutes'], 15)
         self.assertEqual(rec['window_start'], '08:00')
         self.assertEqual(rec['window_end'], '17:00')
-        self.assertEqual(rec['weekdays'], [0,1,2,3,4])
+        self.assertEqual(rec['weekdays'], [0, 1, 2, 3, 4])
 
     def test_monthly_day_28(self):
         result = parse('me lembre todo dia 28 do nosso aniversário de namoro', now=self.now)
         self.assertEqual(result['recurrence']['freq'], 'monthly')
         self.assertEqual(result['recurrence']['day'], 28)
         self.assertIn('todo dia 28', humanize(result['recurrence']))
+
+    def test_daily_clock_without_h_suffix(self):
+        result = parse('todo dia às 8 me lembre de revisar minhas prioridades', now=self.now)
+        self.assertEqual(result['recurrence']['freq'], 'daily')
+        self.assertEqual(result['recurrence']['time'], '08:00')
 
     def test_yearly_requires_month_when_missing(self):
         result = parse('todo ano dia 28 me lembre do aniversário', now=self.now)
@@ -61,10 +69,47 @@ class TimeEngineParsingTests(unittest.TestCase):
         self.assertEqual(result['recurrence']['day'], 12)
 
     def test_interval_stays_inside_window(self):
-        rec = {'freq':'interval','minutes':15,'window_start':'08:00','window_end':'17:00','weekdays':[0,1,2,3,4]}
-        after = int(datetime(2026,9,15,16,52,tzinfo=ZoneInfo('America/Sao_Paulo')).timestamp())
+        rec = {'freq': 'interval', 'minutes': 15, 'window_start': '08:00', 'window_end': '17:00', 'weekdays': [0, 1, 2, 3, 4]}
+        after = int(datetime(2026, 9, 15, 16, 52, tzinfo=ZoneInfo('America/Sao_Paulo')).timestamp())
         nxt = datetime.fromtimestamp(compute_next(rec, after, 'America/Sao_Paulo'), ZoneInfo('America/Sao_Paulo'))
-        self.assertEqual((nxt.hour,nxt.minute),(17,0))
+        self.assertEqual((nxt.hour, nxt.minute), (17, 0))
+
+
+class MultiFlowStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_db = job_store.DB_PATH
+        job_store.DB_PATH = Path(self.tmp.name) / 'jobs.sqlite3'
+
+    def tearDown(self):
+        job_store.DB_PATH = self.old_db
+        self.tmp.cleanup()
+
+    def test_same_chat_can_have_multiple_independent_jobs(self):
+        first = job_store.create_job('pesquise um cliente em Colombo PR', source_platform='telegram', source_chat_id='42')
+        second = job_store.create_job('analise o repositório X', source_platform='telegram', source_chat_id='42')
+        self.assertNotEqual(first['id'], second['id'])
+        claimed = job_store.claim_jobs(2)
+        self.assertEqual({row['id'] for row in claimed}, {first['id'], second['id']})
+        self.assertTrue(all(row['status'] == 'claimed' for row in claimed))
+
+
+class CompanyResearchFilteringTests(unittest.TestCase):
+    def test_generic_articles_and_directories_are_not_business_candidates(self):
+        generic = {
+            'title': 'Como Encontrar Novos Clientes em 10 passos',
+            'url': 'https://sebrae.com.br/artigo/clientes',
+            'content': 'Guia completo para empresas.',
+        }
+        self.assertTrue(_looks_generic(generic))
+
+    def test_local_prospect_request_becomes_entity_discovery_queries(self):
+        queries = _company_queries(
+            'Quero encontrar um possível cliente em Colombo PR que esteja perdendo oportunidade por não ter uma boa presença digital.'
+        )
+        self.assertGreaterEqual(len(queries), 4)
+        self.assertTrue(all('Colombo PR' in query for query in queries))
+        self.assertTrue(any('instagram telefone' in query for query in queries))
 
 
 if __name__ == '__main__':
