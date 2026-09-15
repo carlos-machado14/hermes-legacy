@@ -131,11 +131,78 @@ def _deliver(occ: dict[str, Any]) -> None:
 
 
 def _already_migrated(legacy_id: str) -> bool:
-    for item in list_schedules(limit=500):
+    for item in list_schedules(limit=2000):
         meta = item.get('metadata') or {}
         if str(meta.get('legacy_cron_id') or '') == legacy_id:
             return True
     return False
+
+
+def _legacy_fingerprint(message: str, recurrence: dict[str, Any], timezone: str | None) -> tuple[str, str, str]:
+    normalized_message = re.sub(r'\s+', ' ', str(message or '').strip()).casefold()
+    normalized_tz = str(timezone or 'America/Sao_Paulo').strip()
+    normalized_recurrence = json.dumps(recurrence or {}, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return normalized_message, normalized_tz, normalized_recurrence
+
+
+def _existing_legacy_fingerprints() -> set[tuple[str, str, str]]:
+    out: set[tuple[str, str, str]] = set()
+    for item in list_schedules(limit=5000):
+        if str(item.get('source') or '') != 'legacy-cron-migration':
+            continue
+        out.add(_legacy_fingerprint(
+            str(item.get('message') or ''),
+            item.get('recurrence') or {},
+            str(item.get('timezone') or ''),
+        ))
+    return out
+
+
+def _dedupe_legacy_schedules() -> int:
+    """Cancel duplicated schedules created by old migration runs.
+
+    Only schedules whose source is legacy-cron-migration are touched. Natural
+    schedules created by the user are never collapsed automatically.
+    """
+    current = int(time.time())
+    with sqlite3.connect(DB_PATH, timeout=30) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT id,message,timezone,recurrence_json,status,created_at
+               FROM schedules
+               WHERE source='legacy-cron-migration'
+               ORDER BY created_at,id"""
+        ).fetchall()
+
+        groups: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            try:
+                recurrence = json.loads(str(row['recurrence_json'] or '{}'))
+            except Exception:
+                recurrence = {}
+            key = _legacy_fingerprint(str(row['message'] or ''), recurrence, str(row['timezone'] or ''))
+            groups.setdefault(key, []).append(row)
+
+        cancelled = 0
+        for duplicates in groups.values():
+            if len(duplicates) <= 1:
+                continue
+            active = [row for row in duplicates if str(row['status'] or '') == 'active']
+            keeper = active[0] if active else duplicates[0]
+            for row in duplicates:
+                if str(row['id']) == str(keeper['id']):
+                    continue
+                if str(row['status'] or '') == 'cancelled' and row['id'] != keeper['id']:
+                    continue
+                conn.execute(
+                    """UPDATE schedules
+                       SET status='cancelled', next_run_at=NULL, snoozed_until=NULL, updated_at=?
+                       WHERE id=?""",
+                    (current, str(row['id'])),
+                )
+                cancelled += 1
+        conn.commit()
+    return cancelled
 
 
 def _legacy_parse(schedule: str, message: str) -> dict[str, Any] | None:
@@ -157,6 +224,17 @@ def _legacy_parse(schedule: str, message: str) -> dict[str, Any] | None:
     return parse(synthetic)
 
 
+def _pause_legacy_cron(task: dict[str, Any], legacy_id: str) -> None:
+    hermes = shutil.which('hermes') or str(Path.home() / '.local/bin/hermes')
+    legacy_name = str(task.get('name') or '').strip()
+    if not legacy_name:
+        return
+    try:
+        subprocess.run([hermes, 'cron', 'pause', legacy_name], text=True, capture_output=True, timeout=20)
+    except Exception as exc:
+        _log(f'legacy_pause_failed id={legacy_id} name={legacy_name!r} error={exc}')
+
+
 def migrate_legacy_reminders() -> int:
     try:
         data = json.loads(LEGACY.read_text(encoding='utf-8'))
@@ -164,14 +242,27 @@ def migrate_legacy_reminders() -> int:
         return 0
     if not isinstance(data, dict):
         return 0
+
     created = 0
+    fingerprints = _existing_legacy_fingerprints()
     for legacy_id, task in data.items():
-        if not isinstance(task, dict) or task.get('type') != 'reminder' or _already_migrated(str(legacy_id)):
+        if not isinstance(task, dict) or task.get('type') != 'reminder':
             continue
+        if _already_migrated(str(legacy_id)):
+            _pause_legacy_cron(task, str(legacy_id))
+            continue
+
         message = str(task.get('message') or task.get('name') or 'Lembrete').strip()
         parsed = _legacy_parse(str(task.get('schedule') or ''), message)
         if not parsed or parsed.get('needs_clarification') or not parsed.get('recurrence'):
             continue
+
+        fingerprint = _legacy_fingerprint(message, parsed['recurrence'], parsed.get('timezone'))
+        if fingerprint in fingerprints:
+            _log(f'legacy_migration_duplicate_skipped id={legacy_id}')
+            _pause_legacy_cron(task, str(legacy_id))
+            continue
+
         try:
             create_schedule(
                 str(task.get('name') or f'Lembrete - {message[:60]}'),
@@ -182,13 +273,8 @@ def migrate_legacy_reminders() -> int:
                 source='legacy-cron-migration',
                 metadata={'legacy_cron_id': str(legacy_id), 'legacy_schedule': task.get('schedule')},
             )
-            hermes = shutil.which('hermes') or str(Path.home() / '.local/bin/hermes')
-            legacy_name = str(task.get('name') or '').strip()
-            if legacy_name:
-                try:
-                    subprocess.run([hermes, 'cron', 'pause', legacy_name], text=True, capture_output=True, timeout=20)
-                except Exception as exc:
-                    _log(f'legacy_pause_failed id={legacy_id} name={legacy_name!r} error={exc}')
+            fingerprints.add(fingerprint)
+            _pause_legacy_cron(task, str(legacy_id))
             created += 1
         except Exception as exc:
             _log(f'legacy_migration_failed id={legacy_id} error={exc}')
@@ -210,11 +296,15 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     quarantined = _quarantine_legacy_retries()
+    deduplicated = _dedupe_legacy_schedules()
     migrated = migrate_legacy_reminders()
-    _log(f'time-engine started migrated={migrated} quarantined_retries={quarantined}')
+    _log(
+        f'time-engine started migrated={migrated} '
+        f'deduplicated_legacy={deduplicated} quarantined_retries={quarantined}'
+    )
     print(
         f'Hermes Time Engine ativo; lembretes legados migrados={migrated}; '
-        f'retries antigos bloqueados={quarantined}',
+        f'duplicados legados cancelados={deduplicated}; retries antigos bloqueados={quarantined}',
         flush=True,
     )
     while RUNNING:
