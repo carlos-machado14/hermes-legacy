@@ -19,9 +19,11 @@ from conversation_memory import add as remember_turn, compact as recent_conversa
 from developer_router import handle as handle_developer_command
 from domain_router import classify as classify_domain
 from finance_router import handle as handle_finance_command
+from local_fastpath import handle as handle_local_fastpath
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from mission_router import handle as handle_mission_command
+from task_router import handle as handle_task_command
 from telemetry import emit, trace_id
 from time_router import handle as handle_time_command
 from universal_router import handle as handle_universal_command
@@ -77,7 +79,6 @@ def _retry_small(prompt: str, system: str) -> str | None:
 
 
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    """LLM de resposta sempre recebe conversa recente; memória longa continua seletiva."""
     profile = classify_complexity(prompt)
     os.environ['HERMES_COMPLEXITY'] = profile.tier
     low = prompt.casefold().strip()
@@ -100,7 +101,6 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
                 max_chars=profile.memory_chars,
             )
 
-    # Conversa curta é barata e sempre entra. Isso impede que cada prompt pareça uma nova sessão.
     recent = recent_conversation(limit=8, max_chars=3600)
     context_ms = (time.perf_counter() - context_started) * 1000
 
@@ -191,7 +191,6 @@ def _automation_reply(text: str) -> str | None:
 
 
 def _devops_reply(text: str) -> str | None:
-    # universal/assistant já concentram comandos operacionais suportados localmente.
     try:
         return handle_assistant_command(text) or handle_universal_command(text)
     except Exception:
@@ -206,7 +205,6 @@ def _call(handler: Callable[[str], str | None], text: str) -> str | None:
 
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
-    """LLM decide intenção/contexto primeiro; parsers e routers só executam depois."""
     context = recent_conversation(limit=10, max_chars=4500)
     decision = brain_decide(text, context, _original_llm)
     if not decision or float(decision.get('confidence') or 0.0) < 0.55:
@@ -229,8 +227,13 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
     if route == 'chat':
         return None, 'brain_chat', decision
 
+    if route == 'task':
+        reply = _call(handle_task_command, standalone)
+        if reply is None and standalone != text:
+            reply = _call(handle_task_command, text)
+        return reply, 'brain_task', decision
+
     if route == 'time':
-        # Para mutações por referência natural, resolver assunto/contexto antes do parser temporal.
         if action in {'remove', 'pause', 'resume'}:
             reply = _call(handle_conversation_action, standalone)
             if reply is None and standalone != text:
@@ -264,11 +267,13 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
 
 
 def _legacy_fallback(text: str) -> tuple[str | None, str]:
-    """Fallback semânticamente seguro para indisponibilidade/baixa confiança do brain."""
-    # Ações conversacionais explícitas podem ser resolvidas sem LLM.
     conversational = _call(handle_conversation_action, text)
     if conversational is not None:
         return conversational, 'fallback_context_action'
+
+    task_reply = _call(handle_task_command, text)
+    if task_reply is not None:
+        return task_reply, 'fallback_task'
 
     handlers: tuple[tuple[str, Callable[[str], str | None]], ...] = (
         ('finance', handle_finance_command),
@@ -313,24 +318,33 @@ def ask(text: str) -> str:
         reply = direct
         route_name = 'deterministic_literal'
     else:
-        brain_reply, brain_route, decision = _brain_dispatch(text)
-        if brain_reply is not None:
-            reply = brain_reply
-            route_name = brain_route
-        elif decision and decision.get('route') != 'chat':
-            # O brain entendeu a intenção mas a ferramenta não conseguiu concluir.
-            # O LLM responde sabendo o pedido autossuficiente, sem fingir execução.
-            standalone = str(decision.get('standalone_request') or text)
-            reply = hermes_core.ask(standalone)
-            route_name = brain_route + '_explain'
+        # Comandos locais simples devem responder em milissegundos e nunca depender do modelo.
+        local_reply = _call(handle_local_fastpath, text)
+        if local_reply is not None:
+            reply = local_reply
+            route_name = 'local_fastpath'
         else:
-            fallback_reply, fallback_route = _legacy_fallback(text)
-            if fallback_reply is not None:
-                reply = fallback_reply
-                route_name = fallback_route
+            brain_reply, brain_route, decision = _brain_dispatch(text)
+            if brain_reply is not None:
+                reply = brain_reply
+                route_name = brain_route
+            elif decision and decision.get('route') != 'chat':
+                standalone = str(decision.get('standalone_request') or text)
+                fallback_reply, fallback_route = _legacy_fallback(standalone)
+                if fallback_reply is not None:
+                    reply = fallback_reply
+                    route_name = fallback_route
+                else:
+                    reply = hermes_core.ask(standalone)
+                    route_name = brain_route + '_explain'
             else:
-                reply = hermes_core.ask(text)
-                route_name = 'chat_llm'
+                fallback_reply, fallback_route = _legacy_fallback(text)
+                if fallback_reply is not None:
+                    reply = fallback_reply
+                    route_name = fallback_route
+                else:
+                    reply = hermes_core.ask(text)
+                    route_name = 'chat_llm'
 
     _persist_turn(text, reply)
     emit(
@@ -347,7 +361,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v5.0 — LLM-first Conversation Brain', flush=True)
+        print('Hermes Core v5.1 — LLM-first + Local Fastpath', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
