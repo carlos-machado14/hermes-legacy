@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from conversation_action_router import handle as handle_conversation_action
 from safe_time_router import handle as handle_time
 from subconscious_router import handle as handle_subconscious
 from task_router import handle as handle_task
@@ -9,39 +8,39 @@ from time_router import agenda
 
 
 def handle(text: str) -> str | None:
-    """Resolve estado e ações locais óbvias antes de recorrer ao LLM.
+    """Fastpath somente para leitura de estado local.
 
-    Consultas e mutações explícitas sobre agenda devem continuar funcionando mesmo
-    quando o modelo estiver lento ou indisponível. O LLM fica para linguagem ambígua
-    e raciocínio, não para operações locais que já possuem estado estruturado.
+    Regras determinísticas aqui não decidem mais mutações. Criar, cancelar,
+    reagendar, pausar, retomar ou concluir passa primeiro pelo cérebro semântico,
+    que transforma linguagem natural livre em uma intenção estruturada. O fastpath
+    fica restrito a consultas locais que podem ser respondidas sem risco e sem LLM.
     """
     raw = str(text or '').strip()
     if not raw:
         return None
     t = norm(raw)
 
-    # Ações locais explícitas (inclusive follow-ups como "exclui todas elas")
-    # precisam ocorrer antes do Conversation Brain para não depender do LLM.
-    action_reply = handle_conversation_action(raw)
-    if action_reply is not None:
-        return action_reply
-
     # Recuperação read-only ampla para agenda/rotinas/horários.
     subconscious = handle_subconscious(raw)
     if subconscious is not None:
         return subconscious
 
-    task_hints = (
+    # Consultas simples de tarefas continuam locais por desempenho. Nenhuma mutação
+    # de tarefa é executada por esta camada.
+    task_query_hints = (
         'tarefa', 'tarefas', 'task', 'tasks', 'o que tenho para fazer',
-        'o que preciso fazer', 'finalizei ', 'conclui ', 'terminei ',
-        'reagenda ', 'reagende ', 'reagendei ', 'cancela a task', 'cancele a task',
-        'cancela a tarefa', 'cancele a tarefa',
+        'o que preciso fazer', 'o que falta fazer', 'pendencias', 'pendências',
     )
-    if any(h in t for h in task_hints):
+    mutation_hints = (
+        'finaliz', 'conclu', 'termin', 'reagend', 'cancel', 'exclu', 'remov',
+        'apag', 'paus', 'retom', 'alter', 'mud', 'crie', 'criar', 'adicione',
+    )
+    if any(h in t for h in task_query_hints) and not any(h in t for h in mutation_hints):
         reply = handle_task(raw)
         if reply is not None:
             return reply
 
+    # Compatibilidade de leitura agrupada; ações nunca entram aqui.
     if ('minhas rotinas' in t or 'quais rotinas' in t) and not any(ch.isdigit() for ch in t):
         if 'amanha' in t:
             return agenda('tomorrow')
