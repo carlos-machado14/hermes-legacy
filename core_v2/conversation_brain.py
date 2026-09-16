@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any, Callable
 
+from agent_state import compact as operational_state, refresh as refresh_agent_state
+
 _ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
 _ALLOWED_ROUTES = {
     'time', 'task', 'automation', 'finance', 'research', 'developer', 'devops',
@@ -116,11 +118,17 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
     if not current:
         return None
     recent = str(recent_context or '')[-5000:]
+    try:
+        refresh_agent_state(current_context=current)
+        state = operational_state(max_actions=5)
+    except Exception:
+        state = ''
 
     system = (
         'Você é o cérebro semântico de roteamento do Hermes. Não responda ao usuário. '
-        'Entenda a intenção real da mensagem atual usando a conversa recente, sem depender de frases exatas, palavras mágicas ou templates. '
-        'A mensagem atual tem prioridade, mas pronomes, referências e elipses devem ser resolvidos pelo contexto. '
+        'Entenda a intenção real da mensagem atual usando a conversa recente e o estado operacional persistente. '
+        'Não dependa de frases exatas, palavras mágicas ou templates. '
+        'A mensagem atual tem prioridade, mas pronomes, referências, elipses, objetivos e pendências devem ser resolvidos pelo contexto. '
         'Converta linguagem natural livre em uma intenção estruturada que um executor determinístico possa cumprir. '
         'Retorne SOMENTE JSON válido, sem markdown.\n\n'
         'Schema:\n'
@@ -137,27 +145,29 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
         'Princípios:\n'
         '1. Classifique pelo significado, não pela presença de palavras específicas. Variações, gírias, abreviações e formas indiretas devem funcionar.\n'
         '2. Nunca transforme pergunta em ação. Datas/horários sozinhos não criam nada.\n'
-        '3. Se o usuário se refere ao conjunto que o Hermes acabou de listar, use scope=selection e references_previous_turn=true.\n'
-        '4. Se o usuário pede todos os itens de uma categoria, use scope=all com entity correto.\n'
-        '5. Se pede apenas um item descrito por assunto, use scope=single e reference com o assunto.\n'
-        '6. Não invente IDs. Preencha ids apenas quando eles aparecem literalmente na conversa recente ou mensagem atual.\n'
-        '7. Tarefas e agenda são entidades distintas: task é trabalho a concluir; routine/reminder/event/commitment pertencem ao domínio time.\n'
-        '8. Follow-ups curtos devem ser reconstruídos semanticamente. Ex.: uma resposta equivalente a "faça isso com todos" após uma lista deve virar uma ação sobre aquela seleção, qualquer que seja a redação.\n'
-        '9. Se houver ambiguidade real, preserve-a; o executor pode pedir esclarecimento.\n'
-        '10. O usuário não precisa memorizar comandos. A mesma intenção expressa de outra forma deve gerar a mesma estrutura.'
+        '3. Use o estado operacional para entender o foco atual, tarefas abertas, agendas, objetivos e resultados recentes.\n'
+        '4. Se o usuário se refere ao conjunto que o Hermes acabou de listar, use scope=selection e references_previous_turn=true.\n'
+        '5. Se o usuário pede todos os itens de uma categoria, use scope=all com entity correto.\n'
+        '6. Se pede apenas um item descrito por assunto, use scope=single e reference com o assunto.\n'
+        '7. Não invente IDs. Preencha ids apenas quando eles aparecem literalmente na conversa, no estado ou na mensagem atual.\n'
+        '8. Tarefas e agenda são entidades distintas: task é trabalho a concluir; routine/reminder/event/commitment pertencem ao domínio time.\n'
+        '9. Follow-ups curtos devem ser reconstruídos semanticamente.\n'
+        '10. O usuário não precisa memorizar comandos. A mesma intenção expressa de outra forma deve gerar a mesma estrutura.\n'
+        '11. Quando o usuário comunica progresso, conclusão, impedimento ou mudança de plano, preserve esse contexto para o próximo passo.\n'
+        '12. Se houver ambiguidade real, preserve-a; o executor pode pedir apenas o dado indispensável.'
     )
     prompt = (
+        (state + '\n\n' if state else '') +
         'CONVERSA RECENTE:\n' + (recent or '(sem histórico)') +
         '\n\nMENSAGEM ATUAL:\n' + current +
         '\n\nProduza a intenção estruturada:'
     )
 
-    parsed = _call_once(llm, prompt, system, 260)
+    parsed = _call_once(llm, prompt, system, 280)
     if parsed is None:
-        # Segunda tentativa curta: melhora resiliência sem mudar para regras de frase.
         compact_system = (
             'Classifique semanticamente a intenção do usuário e retorne apenas JSON no schema solicitado. '
-            'Use contexto para resolver referências. Não invente dados.'
+            'Use contexto e estado operacional para resolver referências. Não invente dados.'
         )
-        parsed = _call_once(llm, prompt, compact_system + '\n' + system[-2200:], 180)
+        parsed = _call_once(llm, prompt, compact_system + '\n' + system[-2400:], 190)
     return _validate(parsed, current) if parsed else None
