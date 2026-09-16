@@ -59,11 +59,13 @@ class ComplexityProfile:
     prefer_hard_model: bool
     def to_dict(self) -> dict[str, Any]: return asdict(self)
 
+# Conversas normais agora sempre carregam uma janela curta de contexto. Isso evita
+# que cada mensagem do Telegram pareça uma nova conversa sem aumentar demais o prompt.
 _PROFILES = {
-    'fast': ComplexityProfile('fast', 12, 120, 0, 0, 0, 0, 0, False, False, False),
-    'normal': ComplexityProfile('normal', 45, 280, 2, 550, 1, 1, 420, False, False, False),
-    'hard': ComplexityProfile('hard', 120, 700, 4, 1400, 3, 3, 1400, True, False, True),
-    'mission': ComplexityProfile('mission', 30, 900, 5, 1800, 4, 4, 1800, True, True, True),
+    'fast': ComplexityProfile('fast', 12, 120, 2, 550, 0, 0, 0, True, False, False),
+    'normal': ComplexityProfile('normal', 45, 280, 6, 2400, 1, 1, 420, True, False, False),
+    'hard': ComplexityProfile('hard', 120, 700, 8, 3600, 3, 3, 1400, True, False, True),
+    'mission': ComplexityProfile('mission', 30, 900, 10, 5000, 4, 4, 1800, True, True, True),
 }
 
 
@@ -111,13 +113,13 @@ def classify(text: str) -> ComplexityProfile:
     forced = (os.getenv('HERMES_COMPLEXITY') or '').strip().casefold()
     if forced in _PROFILES:
         base = _PROFILES[forced]
-        return _profile(forced, use_recent=base.use_recent or _looks_like_followup(raw), use_personal=base.use_personal or _looks_personal(raw))
+        return _profile(forced, use_recent=True, use_personal=base.use_personal or _looks_personal(raw))
     if not raw: return _PROFILES['fast']
     if _EXACT_REPLY_RE.match(raw): return _PROFILES['fast']
 
     mission_score = _mission_score(raw)
     if mission_score >= 6:
-        return _profile('mission', use_recent=True if _looks_like_followup(raw) else None, use_personal=_looks_personal(raw) or None)
+        return _profile('mission', use_recent=True, use_personal=_looks_personal(raw) or None)
 
     words = len(re.findall(r'\S+', raw)); hard_score = 0
     if words >= 110 or len(raw) >= 750: hard_score += 2
@@ -125,8 +127,8 @@ def classify(text: str) -> ComplexityProfile:
     hard_score += sum(1 for h in _HARD_HINTS if h in low)
     if re.search(r'\b(?:analise|compare|investigue|diagnostique|planeje|refatore)\b', low): hard_score += 1
     if hard_score >= 2:
-        return _profile('hard', use_recent=_looks_like_followup(raw), use_personal=_looks_personal(raw))
-    return _profile('normal', use_recent=_looks_like_followup(raw), use_personal=_looks_personal(raw))
+        return _profile('hard', use_recent=True, use_personal=_looks_personal(raw))
+    return _profile('normal', use_recent=True, use_personal=_looks_personal(raw))
 
 
 def sla_for(text: str) -> dict[str, Any]:

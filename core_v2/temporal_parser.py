@@ -93,10 +93,10 @@ def _weekdays(text: str) -> list[int] | None:
 
 def _relative_once(text: str, zone: ZoneInfo, now: datetime) -> datetime | None:
     t = norm(text)
-    m = re.search(r'\b(?:daqui a|em)\s+(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b', t)
+    m = re.search(r'\b(?:daqui a|em)\s+(\d+)\s*(min|minuto|minutos|hora|horas|dia|dias)\b', t)
     if m and 'a cada' not in t:
         value, unit = int(m.group(1)), m.group(2)
-        if 'minuto' in unit:
+        if unit == 'min' or 'minuto' in unit:
             return now + timedelta(minutes=value)
         if 'hora' in unit:
             return now + timedelta(hours=value)
@@ -179,10 +179,10 @@ def parse(text: str, *, timezone: str | None = None, now: datetime | None = None
     if monthly:
         return {'timezone': zone_name, 'recurrence': monthly, 'next_run_at': compute_next(monthly, int(current.timestamp()), zone_name)}
 
-    m = re.search(r'\ba cada\s+(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\b', t)
+    m = re.search(r'\ba cada\s+(\d+)\s*(min|minuto|minutos|hora|horas|dia|dias)\b', t)
     if m:
         value, unit = max(1, int(m.group(1))), m.group(2)
-        minutes = value if 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
+        minutes = value if unit == 'min' or 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
         start, end = _window(raw)
         weekdays = _weekdays(raw)
         recurrence: dict[str, Any] = {'freq': 'interval', 'minutes': minutes}
@@ -234,9 +234,9 @@ def parse(text: str, *, timezone: str | None = None, now: datetime | None = None
 def extract_alert_offsets(text: str) -> list[int]:
     t = norm(text)
     out: list[int] = []
-    for m in re.finditer(r'\b(\d+)\s*(minuto|minutos|hora|horas|dia|dias)\s+antes\b', t):
+    for m in re.finditer(r'\b(\d+)\s*(min|minuto|minutos|hora|horas|dia|dias)\s+antes\b', t):
         value, unit = int(m.group(1)), m.group(2)
-        minutes = value if 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
+        minutes = value if unit == 'min' or 'minuto' in unit else value * 60 if 'hora' in unit else value * 1440
         if minutes not in out:
             out.append(minutes)
     return sorted(out, reverse=True)
