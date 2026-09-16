@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from day_overview import render as render_day_overview
 from safe_time_router import handle as handle_time
 from subconscious_router import handle as handle_subconscious
 from task_router import handle as handle_task
@@ -11,16 +12,23 @@ def handle(text: str) -> str | None:
     """Fastpath somente para leitura de estado local.
 
     Regras determinísticas aqui não decidem mais mutações. Criar, cancelar,
-    reagendar, pausar, retomar ou concluir passa primeiro pelo cérebro semântico,
-    que transforma linguagem natural livre em uma intenção estruturada. O fastpath
-    fica restrito a consultas locais que podem ser respondidas sem risco e sem LLM.
+    reagendar, pausar, retomar ou concluir passa primeiro pelo cérebro semântico.
+    Esta camada só responde consultas locais seguras sem depender da disponibilidade
+    do modelo.
     """
     raw = str(text or '').strip()
     if not raw:
         return None
     t = norm(raw)
 
-    # Recuperação read-only ampla para agenda/rotinas/horários.
+    # Consulta genérica do dia: detectada por estrutura (pergunta + referência temporal
+    # sem entidade específica), não por uma frase exata. Exemplos de redações livres
+    # como "oq temos pra hoje?" e "e amanhã?" não precisam passar pelo LLM.
+    overview = render_day_overview(raw)
+    if overview is not None:
+        return overview
+
+    # Recuperação read-only ampla para agenda/rotinas/horários específicos.
     subconscious = handle_subconscious(raw)
     if subconscious is not None:
         return subconscious
