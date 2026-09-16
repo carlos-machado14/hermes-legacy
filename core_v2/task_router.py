@@ -12,7 +12,7 @@ _STOP = {
     'a','o','as','os','de','da','do','das','dos','para','pra','por','que','eu','vc','voce','você','me','minha','meu',
     'tarefa','task','acao','ação','atividade','essa','esse','isso','aquela','aquele','tal','como','marcar','marca','marque',
     'finalizada','finalizado','concluida','concluída','concluido','concluído','feito','feita','terminei','concluir','conclui',
-    'reagendar','reagenda','reagende','mudar','mude','altere','alterar','cancelar','cancela','cancele','remover','remova',
+    'reagendar','reagenda','reagende','reagendei','mudar','mude','movi','altere','alterar','cancelar','cancela','cancele','remover','remova',
 }
 
 
@@ -84,7 +84,7 @@ def handle(text: str) -> str | None:
     t = norm(raw)
 
     is_complete = any(x in t for x in ('finalizei','finalizada','finalizado','conclui','concluida','concluido','terminei','ja fiz','já fiz','feito','feita'))
-    is_reschedule = any(x in t for x in ('reagende','reagenda','reagendar','mude para','mudar para','altere para','alterar para'))
+    is_reschedule = any(x in t for x in ('reagende','reagenda','reagendar','reagendei','mude para','mudar para','movi para','altere para','alterar para'))
     is_cancel = any(x in t for x in ('cancele','cancela','cancelar','remova','remover','apague','apagar'))
     is_list = any(x in t for x in ('minhas tarefas','tarefas de hoje','tasks de hoje','o que tenho para fazer','o que preciso fazer'))
 
