@@ -71,4 +71,11 @@ def compact(ctx: dict[str, Any] | None = None, *, max_items: int = 5) -> str:
     opp = best_opportunity(ctx)
     if opp:
         out.append(f"Melhor oportunidade: {opp.get('title')} | score={opp.get('score',0)}/100")
+    try:
+        from agent_state import compact as operational_state
+        state = operational_state(max_actions=max_items)
+        if state:
+            out.extend(['', state])
+    except Exception:
+        pass
     return '\n'.join(out)
