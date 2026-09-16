@@ -35,8 +35,6 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _send(text: str) -> bool:
-    # Proactive notifications are at-most-once. An ambiguous Telegram response must
-    # never turn into duplicated prompts asking for the same approval.
     ok,_=send_telegram(text,attempts=1); return ok
 
 
@@ -77,6 +75,23 @@ def _initiative_cycle(runtime: dict[str, Any]) -> list[dict[str, Any]]:
     return created
 
 
+def _result_preview(action: dict[str, Any]) -> list[str]:
+    raw = str(action.get('result') or '').strip()
+    if not raw:
+        return ['Resultado: execução concluída, mas sem resumo registrado.']
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    useful: list[str] = []
+    for line in lines:
+        if line.casefold().startswith(('resultado salvo localmente', 'nenhum contato externo')):
+            continue
+        useful.append(line)
+        if len(useful) >= 4:
+            break
+    if not useful:
+        useful = lines[:3]
+    return [f"  {line[:700]}" for line in useful]
+
+
 def _autonomy_cycle(runtime: dict[str, Any]) -> bool:
     settings=load_autonomy_settings()
     if not settings.get('enabled'): return False
@@ -89,16 +104,16 @@ def _autonomy_cycle(runtime: dict[str, Any]) -> bool:
     pending=[a for a in waiting if a.get('status')=='pending_approval']
     approval_text=register_approval_prompt(pending) if pending else None
 
-    # Do not send the same approval set every cycle. register_approval_prompt
-    # suppresses unchanged prompts for 12h unless a new action appears.
     if not executed and not approval_text:
         return False
 
     sections: list[str] = []
     if executed:
-        lines=['🤖 Hermes — avancei nas suas prioridades', '', 'Concluí:']
+        lines=['🤖 Hermes — avancei nas suas prioridades', '', 'O que foi realizado:']
         for action in executed[:5]:
-            lines.append(f"- {action.get('title')}")
+            lines.append(f"\n✅ {action.get('title')}")
+            lines.extend(_result_preview(action))
+        lines.extend(['', 'Se quiser, responda “me mostra o resultado da última ação” para continuarmos a partir dela.'])
         sections.append('\n'.join(lines))
     if approval_text:
         sections.append(approval_text)
@@ -121,7 +136,7 @@ def tick() -> None:
     weekly_day=int(proactive.get('weekly_review_weekday',6))%7; weekly_hour=int(proactive.get('weekly_review_hour',18))%24
 
     if now.hour==morning and _slot(runtime,'morning_sent',day):
-        if _send('☀️ Hermes — plano do dia\n\n'+daily_brief()): record('proactive_brief','Brief da manhã enviado.'); _mark(runtime,'morning_sent',day)
+        if _send('☀️ Hermes — seu dia\n\n'+daily_brief()): record('proactive_brief','Brief da manhã enviado.'); _mark(runtime,'morning_sent',day)
         return
     if now.weekday()==weekly_day and now.hour==weekly_hour and _slot(runtime,'weekly_sent',week):
         if _send('📊 Hermes — revisão semanal\n\n'+weekly_review()): record('proactive_review','Revisão semanal enviada.'); _mark(runtime,'weekly_sent',week)
@@ -139,7 +154,7 @@ def tick() -> None:
 
     overdue=_overdue_high_tasks()
     if overdue and _slot(runtime,'overdue_alert',day):
-        lines=['⚠️ Hermes — há tarefas importantes atrasadas:']+[f"- {t.get('title')}" for t in overdue[:5]]+['\nQuer que eu reorganize suas prioridades?']
+        lines=['⚠️ Hermes — há tarefas importantes atrasadas:']+[f"- {t.get('title')}" for t in overdue[:5]]+['\nVocê pode me dizer “reagenda a task X para amanhã” ou “finalizei a task X”.']
         if _send('\n'.join(lines)): record('proactive_alert',f'{len(overdue)} tarefa(s) de alta prioridade atrasada(s).'); _mark(runtime,'overdue_alert',day)
         return
 
