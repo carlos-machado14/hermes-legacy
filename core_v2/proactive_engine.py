@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from context_builder import snapshot, primary_goal, ranked_tasks, best_opportunity
+from agent_state import get as get_agent_state, refresh as refresh_agent_state
+from context_builder import snapshot, primary_goal, ranked_tasks
 from decision_log import record, summary as decisions_summary
 from time_router import agenda
 
@@ -32,84 +33,114 @@ def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]
     return due_today, overdue, other
 
 
+def _next_step(tasks: list[dict]) -> dict | None:
+    return tasks[0] if tasks else None
+
+
 def daily_brief() -> str:
+    refresh_agent_state()
+    state = get_agent_state()
     ctx = snapshot()
     goal = primary_goal(ctx)
     tasks = ranked_tasks(ctx)
     due_today, overdue, other = _task_bucket(tasks)
+    focus = due_today + overdue + other
 
     out: list[str] = []
     try:
         out.append(agenda('today'))
     except Exception:
-        out.append('📅 Agenda de hoje indisponível no momento.')
+        out.append('📅 Não consegui carregar sua agenda agora.')
 
-    out.extend(['', '✅ Tarefas de hoje'])
-    if due_today:
-        for task in due_today[:8]:
-            out.append(f"- {task.get('title')} [ID {task.get('id')}]")
-    else:
-        out.append('- Nenhuma tarefa com prazo para hoje.')
-
+    out.extend(['', '📌 O que precisa da sua atenção'])
     if overdue:
-        out.extend(['', '⚠️ Atrasadas'])
-        for task in overdue[:5]:
-            out.append(f"- {task.get('title')} [ID {task.get('id')}]")
+        for task in overdue[:4]:
+            out.append(f"- Atrasada: {task.get('title')} [ID {task.get('id')}]")
+    if due_today:
+        for task in due_today[:5]:
+            out.append(f"- Hoje: {task.get('title')} [ID {task.get('id')}]")
+    if not overdue and not due_today:
+        out.append('- Nenhuma tarefa com prazo hoje ou atrasada.')
 
-    focus = (due_today + overdue + other)[:3]
-    if focus:
-        out.extend(['', '🎯 Foco sugerido'])
-        for i, task in enumerate(focus, 1):
-            out.append(f"{i}. {task.get('title')}")
-        record('next_action', focus[0].get('title',''), metadata={'task_id':focus[0].get('id')})
+    next_task = _next_step(focus)
+    if next_task:
+        out.extend(['', '🎯 Próximo passo útil', f"- {next_task.get('title')}"])
+        record('next_action', next_task.get('title',''), metadata={'task_id':next_task.get('id')})
+
+    open_loops = list(state.get('open_loops') or [])
+    non_task_loops = [x for x in open_loops if x.get('type') != 'task']
+    if non_task_loops:
+        out.extend(['', '🧠 Pendências que estou acompanhando'])
+        for item in non_task_loops[:4]:
+            out.append(f"- {item.get('title') or item.get('type')}")
 
     if goal:
-        out.extend(['', f"Objetivo em andamento: {goal.get('title')} — {goal.get('progress',0)}%"])
+        out.extend(['', f"🏁 Objetivo em andamento: {goal.get('title')} — {goal.get('progress',0)}%"])
 
-    out.extend([
-        '',
-        'Você pode responder naturalmente, por exemplo:',
-        '• “finalizei a task X”',
-        '• “reagenda a task X para amanhã às 14h”',
-        '• “cancela o lembrete Y”',
-        '• “o que tenho amanhã?”',
-    ])
+    if not focus and not non_task_loops:
+        out.extend(['', 'Seu dia está sem pendências operacionais relevantes no momento.'])
     return '\n'.join(out)
 
 
 def weekly_review() -> str:
-    ctx=snapshot(); goals=ctx.get('goals') or []; tasks=ranked_tasks(ctx); opp=best_opportunity(ctx)
+    refresh_agent_state()
+    state = get_agent_state()
+    ctx = snapshot()
+    goals = ctx.get('goals') or []
+    tasks = ranked_tasks(ctx)
+    due_today, overdue, other = _task_bucket(tasks)
     out=['Revisão atual:']
     if goals:
-        for g in goals[:5]: out.append(f"- Objetivo: {g.get('title')} | progresso={g.get('progress',0)}% | prazo={g.get('deadline') or 'não definido'}")
-    else: out.append('- Nenhum objetivo ativo.')
-    out.append(f'- Tarefas pendentes: {len(tasks)}')
-    high=[t for t in tasks if t.get('priority')=='high']
-    if high: out.append(f'- Alta prioridade: {len(high)}')
-    if opp: out.append(f"- Melhor oportunidade: {opp.get('title')} ({opp.get('score',0)}/100)")
-    if tasks: out.append(f"- Recomendo focar agora em: {tasks[0].get('title')}")
+        for g in goals[:5]:
+            out.append(f"- Objetivo: {g.get('title')} | progresso={g.get('progress',0)}% | prazo={g.get('deadline') or 'não definido'}")
+    else:
+        out.append('- Nenhum objetivo ativo.')
+    out.append(f'- Tarefas abertas: {len(tasks)}')
+    out.append(f'- Atrasadas: {len(overdue)}')
+    out.append(f'- Para hoje: {len(due_today)}')
+    pending = list(state.get('pending_decisions') or [])
+    if pending:
+        out.append(f'- Decisões pendentes: {len(pending)}')
+    if tasks:
+        out.append(f"- Próximo passo recomendado: {tasks[0].get('title')}")
     try:
-        out.extend(['',agenda('week')])
-    except Exception: pass
+        out.extend(['', agenda('week')])
+    except Exception:
+        pass
     return '\n'.join(out)
 
 
 def recommendation() -> str:
-    ctx=snapshot(); goal=primary_goal(ctx); tasks=ranked_tasks(ctx); opp=best_opportunity(ctx)
-    out=['Minha recomendação agora:']
-    if goal: out.append(f"1. Mantenha foco no objetivo: {goal.get('title')}.")
-    if tasks: out.append(f"2. Execute primeiro: {tasks[0].get('title')}.")
-    if opp: out.append(f"3. A oportunidade mais forte é: {opp.get('title')} (score {opp.get('score',0)}/100).")
-    if not tasks: out.append('2. Defina uma próxima ação concreta ligada ao objetivo principal.')
+    refresh_agent_state()
+    state = get_agent_state()
+    ctx = snapshot()
+    goal = primary_goal(ctx)
+    tasks = ranked_tasks(ctx)
+    overdue = [x for x in list(state.get('open_loops') or []) if x.get('status') == 'overdue']
+    out=['Minha leitura do momento:']
+    if overdue:
+        out.append(f"- Existem {len(overdue)} pendência(s) atrasada(s) que merecem atenção primeiro.")
+    if goal:
+        out.append(f"- Objetivo ativo: {goal.get('title')}.")
+    if tasks:
+        out.append(f"- Próxima ação concreta: {tasks[0].get('title')}.")
+    else:
+        out.append('- Não há tarefa concreta aberta; vale definir o próximo passo do objetivo principal.')
     return '\n'.join(out)
 
 
 def continue_last() -> str:
+    state = get_agent_state(refresh_state=True)
+    actions = list(state.get('next_actions') or [])
+    if actions:
+        return f"Vamos continuar por: {actions[0].get('title')}."
     from decision_log import recent
     rows=recent(20,kind='next_action')
-    if not rows: return 'Ainda não há uma próxima ação registrada.'
+    if not rows:
+        return 'Ainda não há uma próxima ação registrada.'
     item=rows[-1]
     return f"Vamos continuar pela próxima ação definida: {item.get('summary')}."
 
 
-def history() -> str: return decisions_summary(10)
+def history() -> str:
+    return decisions_summary(10)
