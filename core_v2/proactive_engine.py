@@ -1,26 +1,79 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from datetime import datetime
+
 from context_builder import snapshot, primary_goal, ranked_tasks, best_opportunity
 from decision_log import record, summary as decisions_summary
 from time_router import agenda
 
 
+def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    today = datetime.now().date()
+    due_today: list[dict] = []
+    overdue: list[dict] = []
+    other: list[dict] = []
+    for task in tasks:
+        due = str(task.get('due') or '').strip()
+        if not due:
+            other.append(task)
+            continue
+        try:
+            d = datetime.fromisoformat(due).date()
+        except Exception:
+            other.append(task)
+            continue
+        if d < today:
+            overdue.append(task)
+        elif d == today:
+            due_today.append(task)
+        else:
+            other.append(task)
+    return due_today, overdue, other
+
+
 def daily_brief() -> str:
-    ctx=snapshot(); goal=primary_goal(ctx); tasks=ranked_tasks(ctx); opp=best_opportunity(ctx)
-    out=['Prioridade de hoje:']
-    if goal: out.append(f"Objetivo principal: {goal.get('title')} ({goal.get('progress',0)}%)")
-    if tasks:
-        out.append('Ações prioritárias:')
-        for i,task in enumerate(tasks[:5],1): out.append(f"{i}. {task.get('title')}")
-    else: out.append('Nenhuma tarefa pendente registrada.')
-    if opp: out.append(f"Melhor oportunidade atual: {opp.get('title')} (score {opp.get('score',0)}/100)")
+    ctx = snapshot()
+    goal = primary_goal(ctx)
+    tasks = ranked_tasks(ctx)
+    due_today, overdue, other = _task_bucket(tasks)
+
+    out: list[str] = []
     try:
-        out.extend(['',agenda('today')])
-    except Exception: pass
-    if tasks:
-        record('next_action',tasks[0].get('title',''),metadata={'task_id':tasks[0].get('id')})
-        out.append(f"Próxima ação recomendada: {tasks[0].get('title')}")
+        out.append(agenda('today'))
+    except Exception:
+        out.append('📅 Agenda de hoje indisponível no momento.')
+
+    out.extend(['', '✅ Tarefas de hoje'])
+    if due_today:
+        for task in due_today[:8]:
+            out.append(f"- {task.get('title')} [ID {task.get('id')}]")
+    else:
+        out.append('- Nenhuma tarefa com prazo para hoje.')
+
+    if overdue:
+        out.extend(['', '⚠️ Atrasadas'])
+        for task in overdue[:5]:
+            out.append(f"- {task.get('title')} [ID {task.get('id')}]")
+
+    focus = (due_today + overdue + other)[:3]
+    if focus:
+        out.extend(['', '🎯 Foco sugerido'])
+        for i, task in enumerate(focus, 1):
+            out.append(f"{i}. {task.get('title')}")
+        record('next_action', focus[0].get('title',''), metadata={'task_id':focus[0].get('id')})
+
+    if goal:
+        out.extend(['', f"Objetivo em andamento: {goal.get('title')} — {goal.get('progress',0)}%"])
+
+    out.extend([
+        '',
+        'Você pode responder naturalmente, por exemplo:',
+        '• “finalizei a task X”',
+        '• “reagenda a task X para amanhã às 14h”',
+        '• “cancela o lembrete Y”',
+        '• “o que tenho amanhã?”',
+    ])
     return '\n'.join(out)
 
 
