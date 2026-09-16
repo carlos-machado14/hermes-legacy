@@ -77,6 +77,19 @@ def _due_from_text(text: str) -> str | None:
         return None
 
 
+def _is_list_query(t: str) -> bool:
+    direct = (
+        'minhas tarefas', 'tarefas de hoje', 'tasks de hoje', 'o que tenho para fazer',
+        'o que preciso fazer', 'quais tarefas', 'quais tasks', 'que tarefas', 'que tasks',
+        'tarefas eu tenho', 'tasks eu tenho', 'tenho tarefas', 'tenho tasks',
+    )
+    if any(x in t for x in direct):
+        return True
+    has_task_word = any(x in t for x in ('tarefa', 'tarefas', 'task', 'tasks'))
+    has_query_word = any(x in t for x in ('quais', 'qual', 'tenho', 'listar', 'lista', 'mostra', 'mostrar', 'pendentes', 'hoje'))
+    return has_task_word and has_query_word and '?' in t
+
+
 def handle(text: str) -> str | None:
     raw = str(text or '').strip()
     if not raw:
@@ -86,7 +99,7 @@ def handle(text: str) -> str | None:
     is_complete = any(x in t for x in ('finalizei','finalizada','finalizado','conclui','concluida','concluido','terminei','ja fiz','já fiz','feito','feita'))
     is_reschedule = any(x in t for x in ('reagende','reagenda','reagendar','reagendei','mude para','mudar para','movi para','altere para','alterar para'))
     is_cancel = any(x in t for x in ('cancele','cancela','cancelar','remova','remover','apague','apagar'))
-    is_list = any(x in t for x in ('minhas tarefas','tarefas de hoje','tasks de hoje','o que tenho para fazer','o que preciso fazer'))
+    is_list = _is_list_query(t)
 
     if is_list:
         rows = [x for x in list_tasks(status='todo')]
