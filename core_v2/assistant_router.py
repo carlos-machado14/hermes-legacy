@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from assistant_os import attention, brief
+from conversation_action_router import handle as handle_conversation_action
 from resource_manager import snapshot as resource_snapshot
 from time_router import handle as handle_time
 
 
 def handle(text: str) -> str | None:
+    contextual_action = handle_conversation_action(text)
+    if contextual_action is not None:
+        return contextual_action
+
     temporal = handle_time(text)
     if temporal is not None:
         return temporal
