@@ -3,6 +3,7 @@ from __future__ import annotations
 from safe_time_router import handle as handle_time
 from task_router import handle as handle_task
 from temporal_parser import norm
+from time_router import agenda
 
 
 def handle(text: str) -> str | None:
@@ -27,10 +28,17 @@ def handle(text: str) -> str | None:
         if reply is not None:
             return reply
 
+    # Quando o usuário pergunta pelas rotinas do dia, mostrar cada rotina uma vez,
+    # não cada ocorrência de uma rotina intervalada (ex.: 39 avisos de água).
+    if 'minhas rotinas' in t or 'quais rotinas' in t:
+        if 'amanha' in t:
+            return agenda('tomorrow')
+        return agenda('today')
+
     time_query_hints = (
         'agenda de hoje', 'agenda hoje', 'minha agenda hoje', 'o que tenho hoje',
         'agenda de amanha', 'agenda amanhã', 'minha agenda amanha', 'minha agenda amanhã',
-        'meus lembretes', 'quais lembretes', 'minhas rotinas',
+        'meus lembretes', 'quais lembretes',
     )
     if any(h in t for h in time_query_hints):
         reply = handle_time(raw)
