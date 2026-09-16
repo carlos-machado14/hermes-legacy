@@ -4,9 +4,14 @@ from assistant_os import attention, brief
 from conversation_action_router import handle as handle_conversation_action
 from resource_manager import snapshot as resource_snapshot
 from safe_time_router import handle as handle_time
+from task_router import handle as handle_task
 
 
 def handle(text: str) -> str | None:
+    task_reply = handle_task(text)
+    if task_reply is not None:
+        return task_reply
+
     contextual_action = handle_conversation_action(text)
     if contextual_action is not None:
         return contextual_action
