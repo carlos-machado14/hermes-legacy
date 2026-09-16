@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 _ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
 _ALLOWED_ROUTES = {
-    'time', 'task', 'automation', 'finance', 'research', 'developer', 'devops',
+    'time', 'automation', 'finance', 'research', 'developer', 'devops',
     'memory', 'mission', 'connected', 'assistant', 'chat',
 }
 _ALLOWED_ACTIONS = {
@@ -80,7 +80,7 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
         'Sua função é transformar follow-ups em pedidos autossuficientes e escolher a ferramenta/domínio correto. '
         'Retorne SOMENTE JSON válido, sem markdown.\n\n'
         'Schema exato:\n'
-        '{"mode":"chat|query|action|followup","route":"time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat",'
+        '{"mode":"chat|query|action|followup","route":"time|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat",'
         '"action":"none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule",'
         '"standalone_request":"pedido completo em português, preservando a intenção do usuário",'
         '"references_previous_turn":true|false,"confidence":0.0,"reason":"curto"}\n\n'
@@ -90,7 +90,7 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
         '3. "e amanhã?" após falar da agenda é followup/time/list e deve virar "mostrar minha agenda de amanhã".\n'
         '4. "cancela o da água" após falar de lembretes é followup/time/remove e deve preservar o assunto água.\n'
         '5. "me avisa amanhã..." é action/time/create.\n'
-        '6. Tarefas pessoais/operacionais são route=task. "finalizei a task X" = task/complete; "reagenda a task X para amanhã" = task/reschedule; "cancela a task X" = task/remove; "quais tarefas tenho" = task/list.\n'
+        '6. Tarefas pessoais/operacionais usam route=assistant. "finalizei a task X" = assistant/complete; "reagenda a task X para amanhã" = assistant/reschedule; "cancela a task X" = assistant/remove; "quais tarefas tenho" = assistant/list.\n'
         '7. Diferencie tarefa de lembrete: tarefa é algo a fazer/concluir; lembrete/agenda é um aviso em horário.\n'
         '8. Rotinas internas, cron, briefing automático e jobs são automation. Lembretes pessoais e agenda natural são time.\n'
         '9. Conversa comum é chat/chat/none.\n'
