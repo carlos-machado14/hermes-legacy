@@ -7,12 +7,17 @@ from typing import Any, Callable
 
 _ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
 _ALLOWED_ROUTES = {
-    'time', 'automation', 'finance', 'research', 'developer', 'devops',
+    'time', 'task', 'automation', 'finance', 'research', 'developer', 'devops',
     'memory', 'mission', 'connected', 'assistant', 'chat',
 }
 _ALLOWED_ACTIONS = {
     'none', 'create', 'list', 'status', 'update', 'remove', 'pause',
     'resume', 'run', 'answer', 'search', 'execute', 'continue', 'complete', 'reschedule',
+}
+_ALLOWED_SCOPES = {'single', 'selection', 'all', 'filtered', 'unknown'}
+_ALLOWED_ENTITIES = {
+    'routine', 'reminder', 'alert', 'event', 'commitment', 'schedule',
+    'task', 'automation', 'unknown',
 }
 
 
@@ -39,12 +44,30 @@ def _clean(value: Any, limit: int = 1200) -> str:
     return re.sub(r'\s+', ' ', str(value or '')).strip()[:limit]
 
 
+def _clean_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value[:50]:
+        ref = _clean(item, 64)
+        if re.fullmatch(r'[0-9a-fA-F]{6,32}', ref) and ref not in out:
+            out.append(ref)
+    return out
+
+
 def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
     mode = _clean(data.get('mode')).casefold()
     route = _clean(data.get('route')).casefold()
     action = _clean(data.get('action')).casefold() or 'none'
     rewritten = _clean(data.get('standalone_request'), 1800) or current
     confidence = data.get('confidence', 0.0)
+    target = data.get('target') if isinstance(data.get('target'), dict) else {}
+    entity = _clean(target.get('entity')).casefold() or 'unknown'
+    scope = _clean(target.get('scope')).casefold() or 'unknown'
+    reference = _clean(target.get('reference'), 500)
+    ids = _clean_ids(target.get('ids'))
+    filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
+
     try:
         confidence = max(0.0, min(1.0, float(confidence)))
     except Exception:
@@ -52,6 +75,10 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
 
     if mode not in _ALLOWED_MODES or route not in _ALLOWED_ROUTES or action not in _ALLOWED_ACTIONS:
         return None
+    if scope not in _ALLOWED_SCOPES:
+        scope = 'unknown'
+    if entity not in _ALLOWED_ENTITIES:
+        entity = 'unknown'
 
     mutating = action in {'create', 'update', 'remove', 'pause', 'resume', 'run', 'execute', 'complete', 'reschedule'}
     if mutating and mode not in {'action', 'followup'}:
@@ -65,48 +92,72 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
         'confidence': confidence,
         'references_previous_turn': bool(data.get('references_previous_turn')),
         'reason': _clean(data.get('reason'), 300),
+        'target': {
+            'entity': entity,
+            'scope': scope,
+            'reference': reference,
+            'ids': ids,
+            'filters': filters,
+        },
     }
+
+
+def _call_once(llm: Callable[..., str], prompt: str, system: str, max_tokens: int) -> dict[str, Any] | None:
+    try:
+        raw = llm(prompt, system=system, max_tokens=max_tokens)
+    except Exception:
+        return None
+    parsed = _extract_json(raw)
+    return parsed if parsed else None
 
 
 def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str, Any] | None:
     current = str(text or '').strip()
     if not current:
         return None
-    recent = str(recent_context or '')[-4500:]
+    recent = str(recent_context or '')[-5000:]
 
     system = (
-        'Você é o cérebro de roteamento conversacional do Hermes. Não responda ao usuário. '
-        'Entenda a intenção usando a mensagem atual e a conversa recente. A mensagem atual sempre tem prioridade. '
-        'Sua função é transformar follow-ups em pedidos autossuficientes e escolher a ferramenta/domínio correto. '
+        'Você é o cérebro semântico de roteamento do Hermes. Não responda ao usuário. '
+        'Entenda a intenção real da mensagem atual usando a conversa recente, sem depender de frases exatas, palavras mágicas ou templates. '
+        'A mensagem atual tem prioridade, mas pronomes, referências e elipses devem ser resolvidos pelo contexto. '
+        'Converta linguagem natural livre em uma intenção estruturada que um executor determinístico possa cumprir. '
         'Retorne SOMENTE JSON válido, sem markdown.\n\n'
-        'Schema exato:\n'
-        '{"mode":"chat|query|action|followup","route":"time|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat",'
+        'Schema:\n'
+        '{"mode":"chat|query|action|followup",'
+        '"route":"time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat",'
         '"action":"none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule",'
-        '"standalone_request":"pedido completo em português, preservando a intenção do usuário",'
-        '"references_previous_turn":true|false,"confidence":0.0,"reason":"curto"}\n\n'
-        'Regras críticas:\n'
-        '1. Nunca transforme pergunta em ação. "Tenho dois alertas às 8:30?" é query/time/list, não create.\n'
-        '2. Datas e horários não significam criação por si só.\n'
-        '3. "e amanhã?" após falar da agenda é followup/time/list e deve virar "mostrar minha agenda de amanhã".\n'
-        '4. "cancela o da água" após falar de lembretes é followup/time/remove e deve preservar o assunto água.\n'
-        '5. "me avisa amanhã..." é action/time/create.\n'
-        '6. Tarefas pessoais/operacionais usam route=assistant. "finalizei a task X" = assistant/complete; "reagenda a task X para amanhã" = assistant/reschedule; "cancela a task X" = assistant/remove; "quais tarefas tenho" = assistant/list.\n'
-        '7. Diferencie tarefa de lembrete: tarefa é algo a fazer/concluir; lembrete/agenda é um aviso em horário.\n'
-        '8. Rotinas internas, cron, briefing automático e jobs são automation. Lembretes pessoais e agenda natural são time.\n'
-        '9. Conversa comum é chat/chat/none.\n'
-        '10. Não invente IDs, horários, pessoas ou detalhes que não estejam na mensagem ou no contexto.\n'
-        '11. Se houver ambiguidade real, preserve-a no standalone_request; a ferramenta pode pedir esclarecimento.\n'
-        '12. Para código/repos use developer; VPS/processos use devops; pesquisas atuais use research.\n'
-        '13. Parsers são ferramentas posteriores. Você decide intenção e contexto primeiro.'
+        '"standalone_request":"pedido completo e autossuficiente em português",'
+        '"references_previous_turn":true|false,'
+        '"target":{"entity":"routine|reminder|alert|event|commitment|schedule|task|automation|unknown",'
+        '"scope":"single|selection|all|filtered|unknown",'
+        '"reference":"descrição curta do alvo sem inventar dados",'
+        '"ids":[],"filters":{}},'
+        '"confidence":0.0,"reason":"curto"}\n\n'
+        'Princípios:\n'
+        '1. Classifique pelo significado, não pela presença de palavras específicas. Variações, gírias, abreviações e formas indiretas devem funcionar.\n'
+        '2. Nunca transforme pergunta em ação. Datas/horários sozinhos não criam nada.\n'
+        '3. Se o usuário se refere ao conjunto que o Hermes acabou de listar, use scope=selection e references_previous_turn=true.\n'
+        '4. Se o usuário pede todos os itens de uma categoria, use scope=all com entity correto.\n'
+        '5. Se pede apenas um item descrito por assunto, use scope=single e reference com o assunto.\n'
+        '6. Não invente IDs. Preencha ids apenas quando eles aparecem literalmente na conversa recente ou mensagem atual.\n'
+        '7. Tarefas e agenda são entidades distintas: task é trabalho a concluir; routine/reminder/event/commitment pertencem ao domínio time.\n'
+        '8. Follow-ups curtos devem ser reconstruídos semanticamente. Ex.: uma resposta equivalente a "faça isso com todos" após uma lista deve virar uma ação sobre aquela seleção, qualquer que seja a redação.\n'
+        '9. Se houver ambiguidade real, preserve-a; o executor pode pedir esclarecimento.\n'
+        '10. O usuário não precisa memorizar comandos. A mesma intenção expressa de outra forma deve gerar a mesma estrutura.'
     )
     prompt = (
         'CONVERSA RECENTE:\n' + (recent or '(sem histórico)') +
         '\n\nMENSAGEM ATUAL:\n' + current +
-        '\n\nJSON:'
+        '\n\nProduza a intenção estruturada:'
     )
-    try:
-        raw = llm(prompt, system=system, max_tokens=220)
-    except Exception:
-        return None
-    parsed = _extract_json(raw)
+
+    parsed = _call_once(llm, prompt, system, 260)
+    if parsed is None:
+        # Segunda tentativa curta: melhora resiliência sem mudar para regras de frase.
+        compact_system = (
+            'Classifique semanticamente a intenção do usuário e retorne apenas JSON no schema solicitado. '
+            'Use contexto para resolver referências. Não invente dados.'
+        )
+        parsed = _call_once(llm, prompt, compact_system + '\n' + system[-2200:], 180)
     return _validate(parsed, current) if parsed else None
