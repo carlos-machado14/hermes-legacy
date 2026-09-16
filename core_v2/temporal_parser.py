@@ -54,16 +54,24 @@ def _clock(text: str, default: str = '09:00') -> str:
 
 def _window(text: str) -> tuple[str | None, str | None]:
     t = norm(text)
-    m = re.search(
-        r'\b(?:das|de)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\s*'
-        r'(?:ate|a)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b',
-        t,
+    patterns = (
+        re.compile(
+            r'\b(?:das|de)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\s*'
+            r'(?:ate|a)\s*(?:as\s*)?(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b'
+        ),
+        re.compile(
+            r'\bentre\s+(?:as\s*)?(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\s*'
+            r'(?:e|ate)\s+(?:as\s*)?(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b'
+        ),
     )
+    m = next((pattern.search(t) for pattern in patterns if pattern.search(t)), None)
     if not m:
         return None, None
     sh, sm = int(m.group(1)), int(m.group(2) or 0)
     eh, em = int(m.group(3)), int(m.group(4) or 0)
     if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+        return None, None
+    if (eh, em) < (sh, sm):
         return None, None
     return f'{sh:02d}:{sm:02d}', f'{eh:02d}:{em:02d}'
 
