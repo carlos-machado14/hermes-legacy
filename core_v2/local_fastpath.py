@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 from safe_time_router import handle as handle_time
+from subconscious_router import handle as handle_subconscious
 from task_router import handle as handle_task
 from temporal_parser import norm
 from time_router import agenda
 
 
 def handle(text: str) -> str | None:
-    """Resolve operações locais óbvias sem depender do LLM.
+    """Resolve estado local antes de recorrer ao LLM.
 
-    O LLM continua sendo o cérebro para linguagem ambígua/contextual, mas consultas
-    simples de estado e comandos locais explícitos não podem falhar por timeout.
+    O subconscious router é uma camada de recuperação read-only: ele interpreta
+    consultas naturais sobre agenda/rotinas diretamente do estado local, inclusive
+    horários e períodos, sem depender de uma frase exata nem de disponibilidade do modelo.
     """
     raw = str(text or '').strip()
     if not raw:
         return None
     t = norm(raw)
+
+    # Primeiro tenta compreender consultas locais por estrutura semântica ampla.
+    subconscious = handle_subconscious(raw)
+    if subconscious is not None:
+        return subconscious
 
     task_hints = (
         'tarefa', 'tarefas', 'task', 'tasks', 'o que tenho para fazer',
@@ -28,9 +35,8 @@ def handle(text: str) -> str | None:
         if reply is not None:
             return reply
 
-    # Quando o usuário pergunta pelas rotinas do dia, mostrar cada rotina uma vez,
-    # não cada ocorrência de uma rotina intervalada (ex.: 39 avisos de água).
-    if 'minhas rotinas' in t or 'quais rotinas' in t:
+    # Rotinas sem filtro de horário são agrupadas uma vez por rotina.
+    if ('minhas rotinas' in t or 'quais rotinas' in t) and not any(ch.isdigit() for ch in t):
         if 'amanha' in t:
             return agenda('tomorrow')
         return agenda('today')
