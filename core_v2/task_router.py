@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from agent_state import get as get_agent_state, refresh as refresh_agent_state
 from task_manager import complete_task, list_tasks, update_task
 from temporal_parser import norm, parse, tz
 from time_store import DEFAULT_TZ
@@ -90,6 +91,18 @@ def _is_list_query(t: str) -> bool:
     return has_task_word and has_query_word and '?' in t
 
 
+def _agent_followup(base: str, result: str) -> str:
+    try:
+        refresh_agent_state(recent_result=result)
+        state = get_agent_state()
+        actions = list(state.get('next_actions') or [])
+        if actions:
+            return base + f"\n➡️ Próximo passo: {actions[0].get('title')}"
+    except Exception:
+        pass
+    return base
+
+
 def handle(text: str) -> str | None:
     raw = str(text or '').strip()
     if not raw:
@@ -109,7 +122,7 @@ def handle(text: str) -> str | None:
         lines = ['✅ Tarefas pendentes:']
         for task in rows[:20]:
             due = f" — {task.get('due')}" if task.get('due') else ''
-            lines.append(f"- {task.get('title')}{due} [ID {task.get('id')}]")
+            lines.append(f"- {task.get('title')}{due} [ID {task.get('id')}] ")
         return '\n'.join(lines)
 
     if not (is_complete or is_reschedule or is_cancel):
@@ -124,10 +137,12 @@ def handle(text: str) -> str | None:
     ref = str(task.get('id'))
     if is_complete:
         done = complete_task(ref)
-        return f"✅ Marquei como concluída: {done.get('title')}"
+        result = f"Concluída: {done.get('title')}"
+        return _agent_followup(f"✅ Marquei como concluída: {done.get('title')}", result)
     if is_cancel:
         cancelled = update_task(ref, status='cancelled', cancelled_at=int(datetime.now().timestamp()))
-        return f"🗑️ Cancelei a tarefa: {cancelled.get('title')}"
+        result = f"Cancelada: {cancelled.get('title')}"
+        return _agent_followup(f"🗑️ Cancelei a tarefa: {cancelled.get('title')}", result)
     if is_reschedule:
         due = _due_from_text(raw)
         if not due:
@@ -137,5 +152,6 @@ def handle(text: str) -> str | None:
             pretty = datetime.fromisoformat(due).strftime('%d/%m/%Y %H:%M')
         except Exception:
             pretty = due
-        return f"📅 Reagendei: {updated.get('title')} para {pretty}."
+        result = f"Reagendada: {updated.get('title')} para {pretty}"
+        return _agent_followup(f"📅 Reagendei: {updated.get('title')} para {pretty}.", result)
     return None
