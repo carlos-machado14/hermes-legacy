@@ -12,18 +12,42 @@ from time_store import DEFAULT_TZ, compute_next, create_schedule, get_schedule, 
 def _looks_temporal(text: str) -> bool:
     t = norm(text)
     hints = (
-        'lembre', 'lembrete', 'agenda', 'agende', 'evento', 'reuniao', 'compromisso', 'cronograma',
+        'lembre', 'lembrete', 'alerta', 'alertas', 'agenda', 'agende', 'evento', 'reuniao', 'compromisso', 'cronograma',
         'todo dia', 'todos os dias', 'todo ano', 'cada ', 'a cada ', 'amanha', 'hoje', 'sexta', 'segunda',
-        'terca', 'quarta', 'quinta', 'sabado', 'domingo', 'preciso ', 'tenho que', 'tenho ', 'devo ',
+        'terca', 'quarta', 'quinta', 'sabado', 'domingo', 'preciso ', 'tenho que', 'tenho ', 'devo ', 'me avise', 'me avisa',
     )
     return any(x in t for x in hints)
 
 
+def _query_intent(text: str) -> bool:
+    t = norm(text)
+    command_hints = (
+        'me lembre', 'lembre-me', 'me avise', 'me avisa', 'agende', 'crie ', 'adicione ', 'marque ',
+        'cancele ', 'remova ', 'apague ', 'pause ', 'pausar ', 'retome ', 'mude ', 'altere ',
+    )
+    if any(x in t for x in command_hints):
+        return False
+    query_hints = (
+        'duvida', 'quais ', 'qual ', 'quantos ', 'quantas ', 'o que tenho', 'eu tenho ', 'tenho algum',
+        'temos ', 'estamos com ', 'tem algum', 'tem alguma', 'existe ', 'existem ', 'ha algum', 'ha alguma',
+        'meus lembretes', 'minhas rotinas', 'minha agenda', 'confere ', 'ja tenho ', 'já tenho ',
+    )
+    if any(x in t for x in query_hints):
+        return True
+    return '?' in str(text) and not any(x in t for x in ('quero ', 'preciso que ', 'faz ', 'faça ', 'faca '))
+
+
 def _creation_intent(text: str) -> bool:
     t = norm(text)
+    if _query_intent(text):
+        return False
     if any(x in t for x in ('o que tenho', 'minha agenda', 'meu cronograma', 'agenda de hoje', 'agenda de amanha', 'listar lembretes', 'meus lembretes', 'quais lembretes')):
         return False
-    explicit = ('me lembre', 'lembre-me', 'agende', 'agenda ', 'crie um lembrete', 'crie uma rotina', 'tenho reuniao', 'tenho reunião', 'tenho compromisso')
+    explicit = (
+        'me lembre', 'lembre-me', 'me avise', 'me avisa', 'quero que me avise', 'quero que vc me avise',
+        'quero que voce me avise', 'agende', 'agenda ', 'crie um lembrete', 'crie uma rotina',
+        'tenho reuniao', 'tenho reunião', 'tenho compromisso',
+    )
     if any(x in t for x in explicit):
         return True
     if any(x in t for x in ('preciso ', 'tenho que ', 'devo ')) and parse(text) is not None:
@@ -45,6 +69,8 @@ def _kind(text: str) -> str:
 def _message(text: str) -> str:
     raw = str(text or '').strip()
     patterns = [
+        r'^.*?\bme\s+avise\b\s*',
+        r'^.*?\bme\s+avisa\b\s*',
         r'^.*?me lembre(?:-me)?(?:\s+de)?\s+',
         r'^.*?lembre-me(?:\s+de)?\s+',
         r'^.*?agende\s+',
@@ -58,19 +84,28 @@ def _message(text: str) -> str:
             break
 
     leading_temporal = [
+        r'^(?:todos?\s+os\s+dias(?:\s+da\s+semana)?|todo\s+dia|diariamente)\s*',
+        r'^entre\s+(?:as\s*)?\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s+(?:e|até|ate)\s+(?:as\s*)?\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s*',
+        r'^(?:das|de)\s*\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s*(?:até|ate|a)\s*(?:as\s*)?\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s*',
         r'^(?:daqui\s+a|em)\s+\d+\s+(?:minutos?|horas?|dias?)\s+(?:de\s+)?',
-        r'^(?:hoje|amanhã|amanha)(?:\s+(?:às?|as)\s+\d{1,2}(?::\d{2})?\s*(?:h|horas?)?)?\s+(?:de\s+)?',
+        r'^(?:hoje|amanhã|amanha)(?:\s+(?:às?|as)\s+\d{1,2}(?::\d{2})?\s*(?:h|horas?)?)?\s+(?:de\s+|que\s+)?',
         r'^todo\s+dia\s+(?:às?\s+|as\s+)?\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s+(?:de\s+)?',
         r'^todo\s+dia\s+\d{1,2}\s+(?:do|da|de)?\s*',
         r'^todo\s+ano\s+dia\s+\d{1,2}(?:\s+de\s+[A-Za-zÀ-ÿ]+)?\s+(?:do|da|de)?\s*',
     ]
-    for pattern in leading_temporal:
-        candidate = re.sub(pattern, '', cleaned, count=1, flags=re.I)
-        if candidate != cleaned:
-            cleaned = candidate
-            break
+    changed = True
+    while changed:
+        changed = False
+        for pattern in leading_temporal:
+            candidate = re.sub(pattern, '', cleaned, count=1, flags=re.I)
+            if candidate != cleaned:
+                cleaned = candidate
+                changed = True
+                break
 
-    cleaned = re.sub(r'\s+a cada\s+\d+\s+(?:minutos?|horas?|dias?).*$', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'^(?:para\s+)?(?:me\s+)?lembrar(?:-me|me)?\s+(?:de\s+)?', '', cleaned, count=1, flags=re.I)
+    cleaned = re.sub(r'^que\s+', '', cleaned, count=1, flags=re.I)
+    cleaned = re.sub(r'\s+a cada\s+\d+\s+(?:minutos?|horas?|dias?)(?:\s+ok)?\s*$', '', cleaned, flags=re.I)
     cleaned = re.sub(r'\s+todo\s+dia\s+\d+.*$', '', cleaned, flags=re.I)
     cleaned = re.sub(r'\s+todo\s+ano\s+.*$', '', cleaned, flags=re.I)
     return cleaned.strip(' .,-') or raw
@@ -173,6 +208,72 @@ def _preview(item: dict[str, Any], start: datetime, end: datetime, max_occ: int 
     return out
 
 
+def _requested_clock(text: str) -> tuple[int, int] | None:
+    t = norm(text)
+    matches = list(re.finditer(r'\b(?:as|a)\s*(\d{1,2})(?::(\d{2}))?\s*(?:h|horas?)?\b', t))
+    if not matches:
+        return None
+    m = matches[-1]
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+def _schedule_query(text: str) -> str | None:
+    if not _query_intent(text) or not _looks_temporal(text):
+        return None
+    t = norm(text)
+    zone = tz(DEFAULT_TZ)
+    now = datetime.now(zone)
+    if 'amanha' in t:
+        start = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        label = 'amanhã'
+    elif 'hoje' in t:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = 'hoje'
+    else:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = 'hoje'
+    end = start + timedelta(days=1) - timedelta(seconds=1)
+    clock = _requested_clock(text)
+
+    found: list[tuple[datetime, dict[str, Any]]] = []
+    for item in list_schedules(status='active', limit=200):
+        for dt in _preview(item, start, end, 80):
+            if clock and (dt.hour, dt.minute) != clock:
+                continue
+            found.append((dt, item))
+    found.sort(key=lambda pair: pair[0])
+
+    expected = None
+    m = re.search(r'\b(\d+)\s+(?:alertas?|lembretes?|avisos?|rotinas?)\b', t)
+    if m:
+        expected = int(m.group(1))
+
+    when = f" às {clock[0]:02d}:{clock[1]:02d}" if clock else ''
+    if not found:
+        return f'Não. Não encontrei alertas ou lembretes ativos para {label}{when}.'
+
+    unique: list[tuple[datetime, dict[str, Any]]] = []
+    seen: set[tuple[str, int]] = set()
+    for dt, item in found:
+        key = (str(item.get('id') or ''), int(dt.timestamp()))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((dt, item))
+
+    if expected is not None:
+        prefix = 'Sim.' if len(unique) == expected else f'Não exatamente. Encontrei {len(unique)}.'
+    else:
+        prefix = f'Encontrei {len(unique)} alerta(s)/lembrete(s) para {label}{when}.'
+    lines = [prefix]
+    for dt, item in unique[:20]:
+        lines.append(f"- {dt.strftime('%H:%M')} — {item.get('message') or item.get('title')} [ID {item.get('id')}]")
+    return '\n'.join(lines)
+
+
 def agenda(period: str = 'today') -> str:
     zone = tz(DEFAULT_TZ)
     now = datetime.now(zone)
@@ -241,6 +342,10 @@ def handle(text: str) -> str | None:
     if not raw:
         return None
     t = norm(raw)
+
+    query_reply = _schedule_query(raw)
+    if query_reply is not None:
+        return query_reply
 
     if any(x in t for x in ('o que tenho hoje', 'agenda de hoje', 'minha agenda hoje', 'meu dia', 'cronograma de hoje')):
         return agenda('today')
