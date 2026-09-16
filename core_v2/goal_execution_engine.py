@@ -23,10 +23,24 @@ ANALYSIS_WORDS = ('analisar','análise','analise','comparar','comparação','com
 REJECTION_COOLDOWN_SECONDS = 7 * 24 * 3600
 
 
+def _is_schedule_backed_task(task: dict[str, Any]) -> bool:
+    metadata = task.get('metadata') or {}
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get('schedule_id'):
+        return True
+    source = str(metadata.get('source') or '').casefold()
+    kind = str(task.get('kind') or '').casefold()
+    return source in {'natural-language', 'time-router', 'schedule', 'scheduler'} and kind in {'commitment', 'reminder', 'routine', 'event', 'alert'}
+
+
 def classify_task(task: dict[str, Any]) -> dict[str, Any]:
     title = str(task.get('title') or '')
     low = title.casefold()
     metadata = task.get('metadata') or {}
+
+    if _is_schedule_backed_task(task):
+        return {'kind':'scheduled_reminder','risk':'low','requires_approval':False}
 
     if metadata.get('workflow') == 'daily_site_sales':
         step = int(metadata.get('step') or 0)
@@ -71,6 +85,8 @@ def propose_from_context(limit: int = 5) -> list[dict[str, Any]]:
     created=[]
     for task in tasks:
         if len(created) >= limit: break
+        if _is_schedule_backed_task(task):
+            continue
         tid = str(task.get('id') or '')
         if not tid or _already_queued(tid): continue
         c = classify_task(task)
@@ -91,6 +107,15 @@ def release_safe_pending() -> dict[str, Any]:
         task = tasks.get(str(action.get('task_id') or ''))
         if not task:
             kept.append(action)
+            continue
+        if _is_schedule_backed_task(task):
+            action = update_action(
+                action['id'], kind='scheduled_reminder', risk='low',
+                requires_approval=False, status='done',
+                result='Lembrete gerenciado pelo agendador; nenhuma ação externa precisa de aprovação.',
+                reclassified_at=int(time.time()),
+            )
+            released.append(action)
             continue
         current = classify_task(task)
         if current.get('risk') == 'low' and not current.get('requires_approval'):
@@ -143,6 +168,12 @@ def execute_action(ref: str, *, force_approved: bool = False) -> dict[str, Any]:
     if action.get('status') in {'done','rejected'}: return action
 
     kind=action.get('kind')
+    if kind == 'scheduled_reminder':
+        return update_action(
+            action['id'], status='done', requires_approval=False, risk='low',
+            result='Lembrete gerenciado pelo agendador; nenhuma ação externa foi executada.',
+            completed_at=int(time.time()),
+        )
     if kind in {'external_action','user_action'}:
         if action.get('status') == 'approved' or force_approved:
             result = 'Aprovação registrada. A ação está pronta para execução pelo conector responsável; nenhuma ação externa foi simulada localmente.'
@@ -194,9 +225,9 @@ def run_cycle() -> dict[str, Any]:
 def capability_summary() -> str:
     return (
         'O que posso executar sozinho agora:\n'
-        '- pesquisas web simples\n- análises e priorização\n- organização de contexto\n- rascunhos de proposta/oferta/mensagem\n- planejamento interno\n- etapas internas do workflow diário de sites\n\n'
-        'O que exige sua aprovação:\n- contato com pessoas/clientes\n- publicação/envio externo\n- compras/pagamentos\n- deploy/restart/delete\n- push/PR/merge quando configurado como ação externa\n- outras ações com efeito externo relevante\n\n'
-        'Assim eu avanço sozinho no trabalho interno e só interrompo você quando existe efeito externo real.'
+        '- pesquisas web simples\n- análises e priorização\n- organização de contexto\n- rascunhos de proposta/oferta/mensagem\n- planejamento interno\n- lembretes e rotinas pessoais no agendador\n- etapas internas do workflow diário de sites\n\n'
+        'O que exige sua aprovação:\n- contato com pessoas/clientes\n- publicação/envio externo real\n- compras/pagamentos\n- deploy/restart/delete\n- push/PR/merge quando configurado como ação externa\n- outras ações com efeito externo relevante\n\n'
+        'Lembretes que mencionam ações futuras, como “me avise para enviar X”, não são tratados como envio externo: o Hermes apenas lembra no horário configurado.'
     )
 
 
