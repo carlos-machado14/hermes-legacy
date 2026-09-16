@@ -19,6 +19,7 @@ _STOP = {
     'primeiro','primeira','segundo','segunda','ultimo','ultima','último','última','agora','hoje','amanha','amanhã',
     'cancele','cancelar','cancela','remova','remover','remove','apague','apagar','apaga','exclua','excluir',
     'pause','pausar','pausa','pare','parar','suspenda','suspender','retome','retomar','reative','reativar','continue','continuar',
+    'todas','todos','tudo','elas','eles',
 }
 
 
@@ -54,6 +55,26 @@ def _ids_from_recent() -> list[str]:
     return ids
 
 
+def _all_ids_from_last_assistant_list() -> list[str]:
+    """Return IDs from the most recent assistant message that presented choices.
+
+    This lets follow-ups such as "pode excluir todas elas" act on the exact set
+    the assistant just showed, instead of invoking the LLM or guessing globally.
+    """
+    for row in reversed(_recent_rows(limit=20)):
+        if row.get('role') != 'assistant':
+            continue
+        text = str(row.get('text') or '')
+        ids = re.findall(r'\b(?:ID\s*)?([0-9a-f]{8,16})\b', text, re.I)
+        unique: list[str] = []
+        for ref in ids:
+            if ref not in unique:
+                unique.append(ref)
+        if len(unique) >= 2:
+            return unique
+    return []
+
+
 def _ordinal_ref(text: str) -> str | None:
     t = norm(text)
     ids = _ids_from_recent()
@@ -87,6 +108,66 @@ def _score(tokens: set[str], item: dict[str, Any]) -> int:
     if tokens <= target:
         score += 8
     return score
+
+
+def _is_bulk(text: str) -> bool:
+    t = norm(text)
+    return any(x in t for x in ('todas', 'todos', 'tudo', 'todas elas', 'todos eles'))
+
+
+def _bulk_scope_ids(text: str) -> list[str]:
+    """Resolve an explicit bulk request without relying on the model."""
+    t = norm(text)
+
+    # Pronoun follow-up: use exactly the choices shown by Hermes immediately before.
+    if any(x in t for x in ('todas elas', 'todos eles', 'todas', 'todos')):
+        contextual = _all_ids_from_last_assistant_list()
+        if contextual and any(x in t for x in ('elas', 'eles')):
+            return contextual
+
+    items = list_schedules(status='active', limit=1000)
+    if 'rotina' in t:
+        return [str(item['id']) for item in items if str(item.get('kind') or '') == 'routine']
+    if 'lembrete' in t or 'alerta' in t or 'aviso' in t:
+        return [str(item['id']) for item in items if str(item.get('kind') or '') in {'reminder', 'alert'}]
+    if 'evento' in t:
+        return [str(item['id']) for item in items if str(item.get('kind') or '') == 'event']
+    if 'compromisso' in t:
+        return [str(item['id']) for item in items if str(item.get('kind') or '') == 'commitment']
+
+    # Generic "excluir todas elas" after a list of choices.
+    contextual = _all_ids_from_last_assistant_list()
+    if contextual:
+        return contextual
+    return []
+
+
+def _apply_bulk(action: str, refs: list[str]) -> str | None:
+    if not refs:
+        return None
+    changed: list[dict[str, Any]] = []
+    for ref in refs:
+        try:
+            if action == 'remove':
+                changed.append(remove(ref))
+            elif action == 'pause':
+                changed.append(pause(ref))
+            else:
+                changed.append(resume(ref))
+        except Exception:
+            continue
+    if not changed:
+        return None
+
+    verb = {'remove': 'Cancelei', 'pause': 'Pausei', 'resume': 'Retomei'}[action]
+    noun = 'item' if len(changed) == 1 else 'itens'
+    lines = [f"✅ {verb} {len(changed)} {noun}."]
+    # Keep confirmation useful but compact.
+    for item in changed[:8]:
+        lines.append(f"- {item.get('message') or item.get('title')}")
+    if len(changed) > 8:
+        lines.append(f"- e mais {len(changed) - 8}")
+    return '\n'.join(lines)
 
 
 def _resolve(text: str) -> tuple[str | None, list[dict[str, Any]]]:
@@ -135,7 +216,7 @@ def _ambiguous(action: str, rows: list[dict[str, Any]]) -> str:
     lines = [f'Encontrei mais de um lembrete que pode ser o que você quer {verb}:']
     for index, item in enumerate(rows, 1):
         lines.append(f"{index}. {item.get('message') or item.get('title')} [ID {item.get('id')}]")
-    lines.append('Me diga qual deles pelo número, assunto ou ID.')
+    lines.append('Me diga qual deles pelo número, assunto ou ID — ou diga “todos”.')
     return '\n'.join(lines)
 
 
@@ -143,6 +224,11 @@ def handle(text: str) -> str | None:
     action = _action(text)
     if not action:
         return None
+
+    if _is_bulk(text):
+        bulk_reply = _apply_bulk(action, _bulk_scope_ids(text))
+        if bulk_reply is not None:
+            return bulk_reply
 
     ref, ambiguous = _resolve(text)
     if ambiguous:
