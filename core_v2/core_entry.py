@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 import time
 from typing import Callable
@@ -12,36 +11,18 @@ from assistant_router import handle as handle_assistant_command
 from complexity_router import classify as classify_complexity
 from connected_router import handle as handle_connected_command
 from context_builder import compact as compact_context
-from contextual_router import handle as handle_contextual
-from conversation_action_router import handle as handle_conversation_action
 from conversation_brain import decide as brain_decide
 from conversation_memory import add as remember_turn, compact as recent_conversation
 from developer_router import handle as handle_developer_command
-from domain_router import classify as classify_domain
 from finance_router import handle as handle_finance_command
 from intent_executor import execute as execute_intent
-from local_fastpath import handle as handle_local_fastpath
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from mission_router import handle as handle_mission_command
-from task_router import handle as handle_task_command
 from telemetry import emit, trace_id
-from time_router import handle as handle_time_command
 from universal_router import handle as handle_universal_command
 
 _original_llm = hermes_core.llm
-
-_EXACT_REPLY_RE = re.compile(
-    r'^\s*(?:responda|responde)\s+(?:apenas|somente)\s*:?\s*(.+?)\s*$',
-    re.IGNORECASE | re.DOTALL,
-)
-_PERSONAL_HINTS = (
-    'meu ', 'minha ', 'meus ', 'minhas ', 'sobre mim', 'de mim', 'para mim', 'pra mim',
-    'meu perfil', 'meus dados', 'minha memória', 'minha memoria', 'lembra de', 'lembre de',
-    'meu objetivo', 'meus objetivos', 'minha tarefa', 'minhas tarefas', 'meu projeto', 'meus projetos',
-    'minha rotina', 'minhas rotinas', 'meus gastos', 'minhas despesas', 'minhas finanças', 'minhas financas',
-    'o que você sabe sobre mim', 'o que voce sabe sobre mim',
-)
 
 
 def _is_timeout_error(exc: Exception) -> bool:
@@ -49,31 +30,12 @@ def _is_timeout_error(exc: Exception) -> bool:
     return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout'))
 
 
-def _needs_personal_context(prompt: str) -> bool:
-    low = prompt.casefold()
-    return any(hint in low for hint in _PERSONAL_HINTS)
-
-
-def _deterministic_reply(text: str) -> str | None:
-    match = _EXACT_REPLY_RE.match(text)
-    if not match:
-        return None
-    value = match.group(1).strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        value = value[1:-1].strip()
-    return value[:1200] or None
-
-
 def _retry_small(prompt: str, system: str) -> str | None:
     try:
         return _original_llm(
             prompt,
-            system=system + (
-                '\nResponda de forma curta e conclusiva. '
-                'Se faltar informação, diga exatamente qual dado falta. '
-                'Não prometa trabalho em segundo plano e não invente resultados ou ferramentas.'
-            ),
-            max_tokens=160,
+            system=system,
+            max_tokens=180,
         )
     except Exception:
         return None
@@ -82,43 +44,28 @@ def _retry_small(prompt: str, system: str) -> str | None:
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
     profile = classify_complexity(prompt)
     os.environ['HERMES_COMPLEXITY'] = profile.tier
-    low = prompt.casefold().strip()
-
-    route_started = time.perf_counter()
-    route = classify_domain(prompt)
-    route_ms = (time.perf_counter() - route_started) * 1000
 
     context = ''
     long_term = ''
     context_started = time.perf_counter()
-    use_personal = profile.use_personal or _needs_personal_context(prompt)
-    if use_personal and profile.personal_items > 0:
+    if profile.use_personal and profile.personal_items > 0:
         context = compact_context(max_items=max(2, profile.personal_items))
         sync_state_snapshots()
         if profile.memory_limit > 0 and profile.memory_chars > 0:
-            long_term = retrieve_memory(
-                prompt,
-                limit=profile.memory_limit,
-                max_chars=profile.memory_chars,
-            )
-
-    recent = recent_conversation(limit=8, max_chars=3600)
+            long_term = retrieve_memory(prompt, limit=profile.memory_limit, max_chars=profile.memory_chars)
+    recent = recent_conversation(limit=10, max_chars=5000)
     context_ms = (time.perf_counter() - context_started) * 1000
 
     base_system = (
-        'Você é Hermes, uma inteligência artificial pessoal e geral. Responda em português do Brasil. '
-        'Mantenha continuidade entre as mensagens e resolva referências usando a conversa recente. '
-        'A mensagem atual tem prioridade sobre o histórico. '
-        'Entenda antes de agir. Nunca transforme pergunta em ação. '
-        'Ferramentas e parsers são braços auxiliares: não trate palavras-chave como intenção por si só. '
-        'Use somente capacidades reais. Não invente ações executadas, resultados, integrações ou dados. '
-        'Quando faltar informação indispensável, peça somente o dado que falta. '
-        'Ações externas ou sensíveis exigem aprovação quando aplicável.'
+        'Você é Hermes, uma inteligência artificial pessoal. Responda em português do Brasil. '
+        'Use a conversa recente e o estado disponível para manter continuidade. '
+        'Entenda a intenção pelo significado, não por palavras-chave. '
+        'Não invente dados, ações executadas ou ferramentas. Se faltar informação indispensável, peça somente o que falta.'
     )
     if system:
         base_system += '\n' + system
 
-    sections = [f"ROTA SUGERIDA: {route['primary_domain']} / {route['agent']}"]
+    sections: list[str] = []
     if recent:
         sections.append('CONVERSA RECENTE\n' + recent)
     if context:
@@ -126,19 +73,13 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     if long_term:
         sections.append('MEMÓRIA RELEVANTE\n' + long_term)
     sections.append('MENSAGEM ATUAL\n' + prompt)
-    sections.append('Responda ao pedido atual levando em conta a continuidade da conversa.')
     enriched = '\n\n'.join(sections)
-
     requested = max_tokens or profile.max_output_tokens
-    if max_tokens is None and any(k in low for k in ('detalhadamente', 'completo', 'completa', 'passo a passo', 'aprofund')):
-        requested = max(requested, 520)
 
     emit(
         'core.context',
         elapsed_ms=context_ms,
         tier=profile.tier,
-        route=route.get('primary_domain'),
-        route_ms=round(route_ms, 2),
         use_recent=bool(recent),
         use_personal=bool(context or long_term),
         prompt_chars=len(enriched),
@@ -148,31 +89,26 @@ def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | No
     llm_started = time.perf_counter()
     try:
         result = _original_llm(enriched, system=base_system, max_tokens=requested)
-        emit(
-            'core.llm',
-            elapsed_ms=(time.perf_counter() - llm_started) * 1000,
-            tier=profile.tier,
-            ok=True,
-            output_chars=len(result or ''),
-        )
+        emit('core.llm', elapsed_ms=(time.perf_counter() - llm_started) * 1000, tier=profile.tier, ok=True, output_chars=len(result or ''))
         return result
     except Exception as exc:
-        emit(
-            'core.llm',
-            elapsed_ms=(time.perf_counter() - llm_started) * 1000,
-            tier=profile.tier,
-            ok=False,
-            error=str(exc)[:300],
-        )
+        emit('core.llm', elapsed_ms=(time.perf_counter() - llm_started) * 1000, tier=profile.tier, ok=False, error=str(exc)[:300])
         if not _is_timeout_error(exc):
             raise
         retry = _retry_small(enriched, base_system)
         if retry:
             return retry
-        return 'Não consegui obter uma resposta confiável para isso agora.'
+        return 'Não consegui responder com segurança agora. Tente novamente em alguns instantes.'
 
 
 hermes_core.llm = _contextual_llm
+
+
+def _call(handler: Callable[[str], str | None], text: str) -> str | None:
+    try:
+        return handler(text)
+    except Exception:
+        return None
 
 
 def _web_reply(text: str) -> str | None:
@@ -198,18 +134,30 @@ def _devops_reply(text: str) -> str | None:
         return None
 
 
-def _call(handler: Callable[[str], str | None], text: str) -> str | None:
-    try:
-        return handler(text)
-    except Exception:
-        return None
+def _capability_reply(route: str, standalone: str) -> str | None:
+    handlers: dict[str, Callable[[str], str | None]] = {
+        'finance': handle_finance_command,
+        'developer': handle_developer_command,
+        'memory': handle_memory_command,
+        'mission': handle_mission_command,
+        'connected': handle_connected_command,
+        'assistant': handle_assistant_command,
+    }
+    if route == 'automation':
+        return _automation_reply(standalone)
+    if route == 'research':
+        return _web_reply(standalone)
+    if route == 'devops':
+        return _devops_reply(standalone)
+    handler = handlers.get(route)
+    return _call(handler, standalone) if handler else None
 
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
-    context = recent_conversation(limit=10, max_chars=4500)
+    context = recent_conversation(limit=12, max_chars=6000)
     decision = brain_decide(text, context, _original_llm)
-    if not decision or float(decision.get('confidence') or 0.0) < 0.55:
-        return None, 'brain_fallback', decision
+    if not decision or float(decision.get('confidence') or 0.0) < 0.5:
+        return None, 'semantic_fallback', decision
 
     route = str(decision.get('route') or 'chat')
     action = str(decision.get('action') or 'none')
@@ -225,9 +173,6 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
         references_previous_turn=decision.get('references_previous_turn'),
     )
 
-    # Regra central: o cérebro produz uma intenção estruturada e o executor age
-    # sobre essa estrutura diretamente. Não voltamos a interpretar a frase para
-    # descobrir de novo o que o usuário quis dizer.
     try:
         structured_reply = execute_intent(decision, text)
     except Exception as exc:
@@ -235,80 +180,23 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
         structured_reply = None
     if structured_reply is not None:
         emit('core.intent_executor', ok=True, route=route, action=action)
-        return structured_reply, 'brain_structured_executor', decision
+        return structured_reply, 'structured_executor', decision
 
-    if route == 'chat':
-        return None, 'brain_chat', decision
+    response = str(decision.get('response') or '').strip()
+    if route == 'chat' and response:
+        return response, 'semantic_chat', decision
 
-    if route == 'task':
-        reply = _call(handle_task_command, standalone)
-        if reply is None and standalone != text:
-            reply = _call(handle_task_command, text)
-        return reply, 'brain_task', decision
+    capability = _capability_reply(route, standalone)
+    if capability is not None:
+        return capability, 'semantic_' + route, decision
 
-    if route == 'time':
-        # Criação/listagem ainda pode usar o roteador temporal. Mutações simples já
-        # foram tentadas pelo executor estruturado acima; o parser fica apenas como
-        # compatibilidade/fallback, não como fonte principal de intenção.
-        if action in {'remove', 'pause', 'resume'}:
-            reply = _call(handle_conversation_action, standalone)
-            if reply is None and standalone != text:
-                reply = _call(handle_conversation_action, text)
-            if reply is not None:
-                return reply, 'brain_time_context_action', decision
-        reply = _call(handle_time_command, standalone)
-        if reply is None and standalone != text:
-            reply = _call(handle_time_command, text)
-        return reply, 'brain_time', decision
+    mutating = action in {'create', 'update', 'remove', 'pause', 'resume', 'run', 'execute', 'complete', 'reschedule'}
+    if mutating:
+        if response:
+            return response, 'semantic_clarification', decision
+        return 'Preciso de um pouco mais de contexto para executar isso com segurança.', 'semantic_clarification', decision
 
-    if route == 'automation':
-        return _automation_reply(standalone), 'brain_automation', decision
-    if route == 'finance':
-        return _call(handle_finance_command, standalone), 'brain_finance', decision
-    if route == 'research':
-        return _web_reply(standalone), 'brain_research', decision
-    if route == 'developer':
-        return _call(handle_developer_command, standalone), 'brain_developer', decision
-    if route == 'devops':
-        return _devops_reply(standalone), 'brain_devops', decision
-    if route == 'memory':
-        return _call(handle_memory_command, standalone), 'brain_memory', decision
-    if route == 'mission':
-        return _call(handle_mission_command, standalone), 'brain_mission', decision
-    if route == 'connected':
-        return _call(handle_connected_command, standalone), 'brain_connected', decision
-    if route == 'assistant':
-        return _call(handle_assistant_command, standalone) or _call(handle_universal_command, standalone), 'brain_assistant', decision
-    return None, 'brain_unknown', decision
-
-
-def _legacy_fallback(text: str) -> tuple[str | None, str]:
-    conversational = _call(handle_conversation_action, text)
-    if conversational is not None:
-        return conversational, 'fallback_context_action'
-
-    task_reply = _call(handle_task_command, text)
-    if task_reply is not None:
-        return task_reply, 'fallback_task'
-
-    handlers: tuple[tuple[str, Callable[[str], str | None]], ...] = (
-        ('finance', handle_finance_command),
-        ('connected', handle_connected_command),
-        ('assistant', handle_assistant_command),
-        ('universal', handle_universal_command),
-        ('mission', handle_mission_command),
-        ('developer', handle_developer_command),
-        ('memory', handle_memory_command),
-        ('contextual', handle_contextual),
-    )
-    for name, handler in handlers:
-        reply = _call(handler, text)
-        if reply is not None:
-            return reply, 'fallback_' + name
-    web = _web_reply(text)
-    if web is not None:
-        return web, 'fallback_web'
-    return None, 'fallback_llm'
+    return response or None, 'semantic_fallback', decision
 
 
 def _persist_turn(text: str, reply: str) -> None:
@@ -327,39 +215,12 @@ def ask(text: str) -> str:
     tid = trace_id()
     profile = classify_complexity(text)
     os.environ['HERMES_COMPLEXITY'] = profile.tier
-    route_name = 'fallback_llm'
 
-    direct = _deterministic_reply(text)
-    if direct is not None:
-        reply = direct
-        route_name = 'deterministic_literal'
-    else:
-        local_reply = _call(handle_local_fastpath, text)
-        if local_reply is not None:
-            reply = local_reply
-            route_name = 'local_fastpath'
-        else:
-            brain_reply, brain_route, decision = _brain_dispatch(text)
-            if brain_reply is not None:
-                reply = brain_reply
-                route_name = brain_route
-            elif decision and decision.get('route') != 'chat':
-                standalone = str(decision.get('standalone_request') or text)
-                fallback_reply, fallback_route = _legacy_fallback(standalone)
-                if fallback_reply is not None:
-                    reply = fallback_reply
-                    route_name = fallback_route
-                else:
-                    reply = hermes_core.ask(standalone)
-                    route_name = brain_route + '_explain'
-            else:
-                fallback_reply, fallback_route = _legacy_fallback(text)
-                if fallback_reply is not None:
-                    reply = fallback_reply
-                    route_name = fallback_route
-                else:
-                    reply = hermes_core.ask(text)
-                    route_name = 'chat_llm'
+    reply, route_name, decision = _brain_dispatch(text)
+    if reply is None:
+        prompt = str(decision.get('standalone_request') or text) if decision else text
+        reply = hermes_core.ask(prompt)
+        route_name = 'semantic_general'
 
     _persist_turn(text, reply)
     emit(
@@ -376,7 +237,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v5.2 — Semantic Brain + Structured Executor + Local Read Fastpath', flush=True)
+        print('Hermes Core v6.0 — Semantic Brain + Structured Executors', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
@@ -384,7 +245,7 @@ def main() -> int:
     except Exception as exc:
         emit('core.fatal', ok=False, error=str(exc)[:500])
         if _is_timeout_error(exc):
-            print('Não consegui obter uma resposta confiável dentro do limite local.', flush=True)
+            print('Não consegui responder com segurança agora. Tente novamente em alguns instantes.', flush=True)
             return 0
         print(f'Não consegui concluir essa solicitação. Detalhe: {exc}', flush=True)
         return 0

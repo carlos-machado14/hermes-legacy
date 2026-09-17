@@ -1,18 +1,23 @@
-from core_v2.day_overview import is_generic_day_query
+from __future__ import annotations
+
+import core_v2.day_overview as day
 
 
-def test_generic_today_question_accepts_abbreviation():
-    assert is_generic_day_query('Oq temos pra hoje?')
+def test_overview_is_driven_by_structured_period(monkeypatch):
+    monkeypatch.setattr(day, '_schedule_lines', lambda period: ['📅 Agenda', f'- period={period}'])
+    monkeypatch.setattr(day, '_task_sections', lambda period: [f'✅ tasks={period}'])
+
+    today = day.overview('today')
+    tomorrow = day.overview('tomorrow')
+
+    assert 'Seu dia hoje' in today
+    assert 'period=today' in today
+    assert 'tasks=today' in today
+    assert 'Seu dia amanhã' in tomorrow
+    assert 'period=tomorrow' in tomorrow
+    assert 'tasks=tomorrow' in tomorrow
 
 
-def test_generic_tomorrow_followup():
-    assert is_generic_day_query('E amanhã?')
-
-
-def test_specific_entity_stays_with_specialized_router():
-    assert not is_generic_day_query('Quais rotinas temos hoje?')
-    assert not is_generic_day_query('Quais tarefas tenho hoje?')
-
-
-def test_mutation_is_not_read_fastpath():
-    assert not is_generic_day_query('Cancela o que temos hoje')
+def test_day_overview_has_no_language_intent_classifier():
+    assert not hasattr(day, 'is_generic_day_query')
+    assert not hasattr(day, 'render')
