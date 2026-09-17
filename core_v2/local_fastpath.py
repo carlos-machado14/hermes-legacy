@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from day_overview import render as render_day_overview
+from local_action_intent import handle as handle_local_action
 from safe_time_router import handle as handle_time
 from subconscious_router import handle as handle_subconscious
 from task_router import handle as handle_task
@@ -9,32 +10,31 @@ from time_router import agenda
 
 
 def handle(text: str) -> str | None:
-    """Fastpath somente para leitura de estado local.
+    """Fastpath local para estado e ações internas simples.
 
-    Regras determinísticas aqui não decidem mais mutações. Criar, cancelar,
-    reagendar, pausar, retomar ou concluir passa primeiro pelo cérebro semântico.
-    Esta camada só responde consultas locais seguras sem depender da disponibilidade
-    do modelo.
+    Ações locais seguras (agenda/lembretes/rotinas) podem ser resolvidas sem LLM
+    quando a intenção é inequívoca. Consultas também são atendidas localmente.
+    Linguagem ambígua continua indo para o cérebro semântico.
     """
     raw = str(text or '').strip()
     if not raw:
         return None
     t = norm(raw)
 
-    # Consulta genérica do dia: detectada por estrutura (pergunta + referência temporal
-    # sem entidade específica), não por uma frase exata. Exemplos de redações livres
-    # como "oq temos pra hoje?" e "e amanhã?" não precisam passar pelo LLM.
+    # Primeiro: mutações internas simples e inequívocas. Isso evita que cancelar
+    # todos os lembretes dependa da disponibilidade do modelo.
+    local_action = handle_local_action(raw)
+    if local_action is not None:
+        return local_action
+
     overview = render_day_overview(raw)
     if overview is not None:
         return overview
 
-    # Recuperação read-only ampla para agenda/rotinas/horários específicos.
     subconscious = handle_subconscious(raw)
     if subconscious is not None:
         return subconscious
 
-    # Consultas simples de tarefas continuam locais por desempenho. Nenhuma mutação
-    # de tarefa é executada por esta camada.
     task_query_hints = (
         'tarefa', 'tarefas', 'task', 'tasks', 'o que tenho para fazer',
         'o que preciso fazer', 'o que falta fazer', 'pendencias', 'pendências',
@@ -48,7 +48,6 @@ def handle(text: str) -> str | None:
         if reply is not None:
             return reply
 
-    # Compatibilidade de leitura agrupada; ações nunca entram aqui.
     if ('minhas rotinas' in t or 'quais rotinas' in t) and not any(ch.isdigit() for ch in t):
         if 'amanha' in t:
             return agenda('tomorrow')
