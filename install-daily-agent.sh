@@ -10,7 +10,9 @@ SERVICE="$SYSTEMD_USER/hermes-daily-agent.service"
 MODEL_DIR="$HERMES_HOME/models/daily-agent"
 MODEL_NAME="${HERMES_DAILY_AGENT_MODEL:-Qwen3-0.6B-Q4_0.gguf}"
 MODEL_FILE="$MODEL_DIR/$MODEL_NAME"
-MODEL_URL="${HERMES_DAILY_AGENT_MODEL_URL:-https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true}"
+# Fonte GGUF mantida pelo projeto ggml-org/llama.cpp. O repositório Qwen oficial
+# não expõe este Q4_0 nesse caminho, o que causava 404 na instalação.
+MODEL_URL="${HERMES_DAILY_AGENT_MODEL_URL:-https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true}"
 PORT="${HERMES_DAILY_AGENT_PORT:-8087}"
 THREADS="${HERMES_DAILY_AGENT_THREADS:-2}"
 CTX="${HERMES_DAILY_AGENT_CTX:-2048}"
@@ -76,17 +78,34 @@ mkdir -p "$SYSTEMD_USER" "$ENV_DIR" "$HERMES_HOME/core-v2/state" "$MODEL_DIR"
 
 # O llama-server instalado nesta VPS foi compilado sem suporte HTTPS. Por isso o
 # modelo é baixado uma vez por curl e o serviço sempre carrega um arquivo GGUF local.
+# Também descartamos arquivos muito pequenos para nunca tratar página de erro ou
+# ponteiro incompleto como um modelo válido.
+if [ -s "$MODEL_FILE" ]; then
+  SIZE="$(stat -c%s "$MODEL_FILE" 2>/dev/null || echo 0)"
+  if [ "$SIZE" -lt 100000000 ]; then
+    log "Arquivo de modelo existente é inválido/incompleto (${SIZE} bytes); removendo."
+    rm -f "$MODEL_FILE"
+  fi
+fi
+
 if [ ! -s "$MODEL_FILE" ]; then
   command -v curl >/dev/null 2>&1 || { log "ERRO: curl não encontrado para baixar o GGUF."; exit 5; }
   log "Baixando modelo local (~430 MB) para $MODEL_FILE ..."
   TMP="$MODEL_FILE.part"
   rm -f "$TMP"
-  if ! curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 -o "$TMP" "$MODEL_URL"; then
+  if ! curl -fL --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 15 -o "$TMP" "$MODEL_URL"; then
     rm -f "$TMP"
     log "ERRO: não consegui baixar o GGUF. Nenhum provider remoto foi ativado."
     exit 6
   fi
+  SIZE="$(stat -c%s "$TMP" 2>/dev/null || echo 0)"
+  if [ "$SIZE" -lt 100000000 ]; then
+    rm -f "$TMP"
+    log "ERRO: download retornou somente ${SIZE} bytes; recusando arquivo inválido."
+    exit 8
+  fi
   mv "$TMP" "$MODEL_FILE"
+  log "Download concluído: $((SIZE / 1024 / 1024)) MB."
 fi
 
 # Pare a unidade antiga antes de testar a porta, evitando corrida entre enable --now
