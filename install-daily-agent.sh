@@ -7,9 +7,11 @@ SYSTEMD_USER="$HOME/.config/systemd/user"
 ENV_DIR="$HOME/.config/hermes"
 ENV_FILE="$ENV_DIR/daily-agent.env"
 SERVICE="$SYSTEMD_USER/hermes-daily-agent.service"
-PORT="${HERMES_DAILY_AGENT_PORT:-8087}"
-MODEL_REF="${HERMES_DAILY_AGENT_HF:-Qwen/Qwen3-0.6B-GGUF:Q4_0}"
+MODEL_DIR="$HERMES_HOME/models/daily-agent"
 MODEL_NAME="${HERMES_DAILY_AGENT_MODEL:-Qwen3-0.6B-Q4_0.gguf}"
+MODEL_FILE="$MODEL_DIR/$MODEL_NAME"
+MODEL_URL="${HERMES_DAILY_AGENT_MODEL_URL:-https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true}"
+PORT="${HERMES_DAILY_AGENT_PORT:-8087}"
 THREADS="${HERMES_DAILY_AGENT_THREADS:-2}"
 CTX="${HERMES_DAILY_AGENT_CTX:-2048}"
 
@@ -34,6 +36,35 @@ find_llama_server() {
   return 1
 }
 
+port_free() {
+  python3 - "$1" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+try:
+    s.bind(('127.0.0.1', port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()
+PY
+}
+
+choose_port() {
+  local requested="$1" candidate
+  if port_free "$requested"; then
+    printf '%s\n' "$requested"
+    return 0
+  fi
+  for candidate in 8087 8088 8089 8092 8093 8094 8095 8096 8097 8098 8099; do
+    if port_free "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 LLAMA_SERVER="$(find_llama_server || true)"
 if [ -z "$LLAMA_SERVER" ]; then
   log "ERRO: não encontrei o llama-server já usado pelo Hermes."
@@ -41,7 +72,31 @@ if [ -z "$LLAMA_SERVER" ]; then
   exit 2
 fi
 
-mkdir -p "$SYSTEMD_USER" "$ENV_DIR" "$HERMES_HOME/core-v2/state"
+mkdir -p "$SYSTEMD_USER" "$ENV_DIR" "$HERMES_HOME/core-v2/state" "$MODEL_DIR"
+
+# O llama-server instalado nesta VPS foi compilado sem suporte HTTPS. Por isso o
+# modelo é baixado uma vez por curl e o serviço sempre carrega um arquivo GGUF local.
+if [ ! -s "$MODEL_FILE" ]; then
+  command -v curl >/dev/null 2>&1 || { log "ERRO: curl não encontrado para baixar o GGUF."; exit 5; }
+  log "Baixando modelo local (~430 MB) para $MODEL_FILE ..."
+  TMP="$MODEL_FILE.part"
+  rm -f "$TMP"
+  if ! curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 -o "$TMP" "$MODEL_URL"; then
+    rm -f "$TMP"
+    log "ERRO: não consegui baixar o GGUF. Nenhum provider remoto foi ativado."
+    exit 6
+  fi
+  mv "$TMP" "$MODEL_FILE"
+fi
+
+# Pare a unidade antiga antes de testar a porta, evitando corrida entre enable --now
+# e restart. Se 8087 estiver ocupado por outro processo, seleciona outra porta local.
+systemctl --user stop hermes-daily-agent.service 2>/dev/null || true
+PORT="$(choose_port "$PORT" || true)"
+if [ -z "$PORT" ]; then
+  log "ERRO: não encontrei porta local livre para o Daily Agent."
+  exit 7
+fi
 
 cat > "$ENV_FILE" <<EOF
 # Hermes Daily Agent - somente local
@@ -58,26 +113,23 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_SERVER} -hf ${MODEL_REF} --host 127.0.0.1 --port ${PORT} -c ${CTX} -t ${THREADS} -np 1
+ExecStart=${LLAMA_SERVER} -m ${MODEL_FILE} --host 127.0.0.1 --port ${PORT} -c ${CTX} -t ${THREADS} -np 1
 Restart=always
 RestartSec=3
 Environment=HOME=${HOME}
-Environment=HF_HOME=${HERMES_HOME}/models/huggingface
 
 [Install]
 WantedBy=default.target
 EOF
 
-# Estado antigo do circuit breaker não deve bloquear o novo modelo dedicado.
 rm -f "$HERMES_HOME/core-v2/state/daily_agent_health.json"
 
 systemctl --user daemon-reload
-systemctl --user enable --now hermes-daily-agent.service
+systemctl --user enable hermes-daily-agent.service >/dev/null
 systemctl --user restart hermes-daily-agent.service
 
-log "Modelo diário: ${MODEL_REF}"
+log "Modelo diário local: ${MODEL_FILE}"
 log "Endpoint local: http://127.0.0.1:${PORT}/v1"
-log "A primeira inicialização pode demorar enquanto o GGUF (~430 MB) é baixado."
 
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
