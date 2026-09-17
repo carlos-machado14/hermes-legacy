@@ -55,16 +55,24 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _pick(data: dict[str, Any], long_key: str, short_key: str, default: Any = None) -> Any:
+    if long_key in data:
+        return data.get(long_key)
+    return data.get(short_key, default)
+
+
 def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
-    mode = _clean(data.get('mode')).casefold()
-    route = _clean(data.get('route')).casefold()
-    action = _clean(data.get('action')).casefold() or 'none'
-    entity = _clean(data.get('entity')).casefold() or 'unknown'
-    scope = _clean(data.get('scope')).casefold() or 'unknown'
-    reference = _clean(data.get('reference'), 360)
-    response = _clean(data.get('response'), 1200)
-    rewritten = _clean(data.get('standalone_request'), 900) or current
-    confidence = data.get('confidence', 0.0)
+    # Aceita tanto o contrato longo antigo quanto o contrato curto usado pelo
+    # modelo de 0.6B. O executor interno continua recebendo o formato completo.
+    mode = _clean(_pick(data, 'mode', 'm')).casefold()
+    route = _clean(_pick(data, 'route', 'r')).casefold()
+    action = _clean(_pick(data, 'action', 'a')).casefold() or 'none'
+    entity = _clean(_pick(data, 'entity', 'e')).casefold() or 'unknown'
+    scope = _clean(_pick(data, 'scope', 's')).casefold() or 'unknown'
+    reference = _clean(_pick(data, 'reference', 'ref'), 360)
+    response = _clean(_pick(data, 'response', 'resp'), 1200)
+    rewritten = _clean(_pick(data, 'standalone_request', 'q'), 900) or current
+    confidence = _pick(data, 'confidence', 'c', 0.0)
 
     try:
         confidence = max(0.0, min(1.0, float(confidence)))
@@ -83,10 +91,10 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
         return None
 
     filters: dict[str, Any] = {}
-    period = _clean(data.get('period'), 40).casefold()
-    date = _clean(data.get('date'), 40)
-    hour = _to_int(data.get('hour'))
-    minute = _to_int(data.get('minute'))
+    period = _clean(_pick(data, 'period', 'p'), 40).casefold()
+    date = _clean(_pick(data, 'date', 'd'), 40)
+    hour = _to_int(_pick(data, 'hour', 'h'))
+    minute = _to_int(_pick(data, 'minute', 'n'))
     if period:
         filters['period'] = period
     if date:
@@ -96,7 +104,8 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
     if minute is not None:
         filters['minute'] = minute
 
-    ids = data.get('ids') if isinstance(data.get('ids'), list) else []
+    raw_ids = _pick(data, 'ids', 'i', [])
+    ids = raw_ids if isinstance(raw_ids, list) else []
     clean_ids: list[str] = []
     for value in ids[:20]:
         ref = _clean(value, 64)
@@ -110,8 +119,8 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
         'standalone_request': rewritten,
         'response': response,
         'confidence': confidence,
-        'references_previous_turn': bool(data.get('references_previous_turn')),
-        'reason': _clean(data.get('reason'), 180),
+        'references_previous_turn': bool(_pick(data, 'references_previous_turn', 'prev', False)),
+        'reason': _clean(_pick(data, 'reason', 'why'), 180),
         'target': {
             'entity': entity,
             'scope': scope,
@@ -130,35 +139,57 @@ def _call_once(llm: Callable[..., str], prompt: str, system: str, max_tokens: in
     return _extract_json(raw)
 
 
+def _compact_examples(text: str) -> str:
+    lines: list[str] = []
+    for raw in select_examples(text, limit=3).splitlines():
+        try:
+            item = json.loads(raw)
+        except Exception:
+            continue
+        compact = {
+            'u': item.get('u'),
+            'm': item.get('mode'),
+            'r': item.get('route'),
+            'a': item.get('action'),
+            'e': item.get('entity'),
+            's': item.get('scope'),
+        }
+        lines.append(json.dumps(compact, ensure_ascii=False, separators=(',', ':')))
+    return '\n'.join(lines[:3])
+
+
 def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str, Any] | None:
     current = str(text or '').strip()
     if not current:
         return None
 
-    # The tiny agent only understands intent. State lookup and execution happen later.
-    recent = str(recent_context or '')[-700:]
+    # O 0.6B deve classificar, não raciocinar sobre todo o estado. Mantemos só
+    # um pedaço mínimo da conversa para pronomes/follow-ups e três exemplos
+    # semanticamente próximos. Isso reduz o prompt de ~780 tokens para poucas
+    # centenas sem transformar exemplos em regras hardcoded.
+    recent = str(recent_context or '')[-260:]
     now = datetime.now(tz(DEFAULT_TZ)).isoformat(timespec='minutes')
-    examples = select_examples(current, limit=7)
+    examples = _compact_examples(current)
 
     system = (
         '/no_think\n'
-        'Você é o agente operacional diário do Hermes. Classifique intenção e extraia tempo/contexto. '
-        'Retorne SOMENTE um JSON compacto, sem markdown nem explicação. '
-        'Nunca transforme pergunta em ação. Nunca invente IDs. Se uma ação estiver ambígua, peça o dado faltante em response. '
-        'Assuntos simples de agenda/tarefa/rotina ficam em time/task/automation; pesquisa, código, explicação ou conversa geral devem ser delegados. '
-        'Para delegar use a route adequada e action=answer/search, deixando response vazio. '
-        'Campos: mode,route,action,entity,scope,reference,period,date,hour,minute,references_previous_turn,confidence,response,reason,standalone_request. '
-        'mode=chat|query|action|followup; route=time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat; '
-        'action=none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule; '
-        'entity=day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown; scope=single|selection|all|filtered|unknown; '
-        'period=today|tomorrow|this_week|next_week|this_month|next_month quando aplicável.'
+        'Só JSON. Entenda PT-BR informal e classifique a intenção. '
+        'Nunca transforme pergunta em ação e nunca invente ID. '
+        'Use chaves curtas: m,r,a,e,s,ref,p,d,h,n,prev,c,resp,q. '
+        'm=chat|query|action|followup; '
+        'r=time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat; '
+        'a=none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule; '
+        'e=day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown; '
+        's=single|selection|all|filtered|unknown. '
+        'p=today|tomorrow|this_week|next_week|this_month|next_month quando couber. '
+        'Se faltar dado para uma ação, a=answer,r=chat e resp pergunta só o necessário.'
     )
     prompt = (
-        f'AGORA:{now}\n'
-        f'EXEMPLOS:\n{examples}\n'
-        f'CONTEXTO:{recent or "-"}\n'
-        f'MENSAGEM:{current}'
+        f'T:{now}\n'
+        f'EX:\n{examples}\n'
+        f'CTX:{recent or "-"}\n'
+        f'U:{current}'
     )
 
-    parsed = _call_once(llm, prompt, system, 128)
+    parsed = _call_once(llm, prompt, system, 96)
     return _validate(parsed, current) if parsed else None
