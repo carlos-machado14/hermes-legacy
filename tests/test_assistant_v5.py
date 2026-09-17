@@ -22,19 +22,16 @@ from time_store import compute_next
 from web_research import _company_queries, _looks_generic
 
 
-class ComplexityV5Tests(unittest.TestCase):
-    def test_natural_complex_work_becomes_mission(self):
-        cases = [
-            'Quero encontrar um possível cliente em Colombo PR que esteja perdendo oportunidade por não ter uma boa presença digital. Analise e me traga o melhor.',
-            'Voce precisa me trazer os dados de 1 empresa que precisa de um site com todos os dados, links e imagens.',
-            'Implemente tudo no projeto e valide os testes.',
-        ]
-        for text in cases:
-            with self.subTest(text=text):
-                self.assertEqual(classify(text).tier, 'mission')
+class ComplexityV6Tests(unittest.TestCase):
+    def test_complexity_is_language_agnostic(self):
+        self.assertEqual(classify('curto').tier, 'fast')
+        self.assertEqual(classify('x ' * 80).tier, 'normal')
+        self.assertEqual(classify('x ' * 300).tier, 'hard')
 
-    def test_simple_question_stays_normal(self):
-        self.assertEqual(classify('Qual a capital da Itália?').tier, 'normal')
+    def test_same_size_has_same_tier_regardless_of_wording(self):
+        first = 'alpha ' * 40
+        second = 'beta ' * 40
+        self.assertEqual(classify(first).tier, classify(second).tier)
 
 
 class TimeEngineParsingTests(unittest.TestCase):
@@ -82,7 +79,6 @@ class TimeEngineParsingTests(unittest.TestCase):
         self.assertEqual(_message('Me lembre daqui a 2 minutos de testar o Hermes'), 'testar o Hermes')
 
     def test_monthly_time_removed_from_reminder_message(self):
-        # The cadence is removed while the natural Portuguese preposition is kept.
         self.assertEqual(
             _message('Me lembre todo dia 28 do nosso aniversário de namoro'),
             'do nosso aniversário de namoro',
