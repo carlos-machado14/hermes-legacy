@@ -159,44 +159,31 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
-    context = recent_conversation(limit=12, max_chars=6000)
+    context = recent_conversation(limit=6, max_chars=1800)
     started = time.perf_counter()
     try:
         decision = brain_decide(text, context, semantic_llm)
     except Exception as exc:
         emit(
-            'core.brain',
-            ok=False,
-            route='unknown',
-            action='none',
-            reason='brain_exception',
-            error=str(exc)[:300],
-            timeout=_is_timeout_error(exc),
+            'core.brain', ok=False, route='unknown', action='none', reason='brain_exception',
+            error=str(exc)[:300], timeout=_is_timeout_error(exc),
             elapsed_ms=(time.perf_counter() - started) * 1000,
         )
-        return None, 'semantic_fallback', None
+        return None, 'semantic_unavailable', None
 
     if not decision or float(decision.get('confidence') or 0.0) < 0.5:
         emit(
-            'core.brain',
-            ok=False,
-            route='unknown',
-            action='none',
-            reason='unavailable_or_low_confidence',
-            elapsed_ms=(time.perf_counter() - started) * 1000,
+            'core.brain', ok=False, route='unknown', action='none',
+            reason='unavailable_or_low_confidence', elapsed_ms=(time.perf_counter() - started) * 1000,
         )
-        return None, 'semantic_fallback', decision
+        return None, 'semantic_unavailable', decision
 
     route = str(decision.get('route') or 'chat')
     action = str(decision.get('action') or 'none')
     standalone = str(decision.get('standalone_request') or text).strip() or text
 
     emit(
-        'core.brain',
-        ok=True,
-        route=route,
-        action=action,
-        mode=decision.get('mode'),
+        'core.brain', ok=True, route=route, action=action, mode=decision.get('mode'),
         confidence=decision.get('confidence'),
         references_previous_turn=decision.get('references_previous_turn'),
         elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -253,6 +240,13 @@ def ask(text: str) -> str:
             reply = safe_reply
             route_name = 'safe_read_resilience'
 
+    # Se o cérebro semântico não conseguiu classificar, não fazemos uma segunda
+    # espera longa no LLM geral. Isso evita transformar um SLA de poucos segundos
+    # em 30-60 segundos de bloqueio. Consultas locais já tiveram chance no fallback.
+    if reply is None and route_name == 'semantic_unavailable':
+        reply = 'O cérebro semântico não respondeu a tempo. Não executei nenhuma ação para evitar fazer algo errado.'
+        route_name = 'semantic_unavailable_fast'
+
     if reply is None:
         prompt = str(decision.get('standalone_request') or text) if decision else text
         reply = hermes_core.ask(prompt)
@@ -260,20 +254,16 @@ def ask(text: str) -> str:
 
     _persist_turn(text, reply)
     emit(
-        'core.total',
-        elapsed_ms=(time.perf_counter() - started) * 1000,
-        route=route_name,
-        tier=profile.tier,
-        input_chars=len(text),
-        output_chars=len(reply or ''),
-        trace=tid,
+        'core.total', elapsed_ms=(time.perf_counter() - started) * 1000,
+        route=route_name, tier=profile.tier, input_chars=len(text),
+        output_chars=len(reply or ''), trace=tid,
     )
     return reply
 
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v6.3 — Isolated Semantic Provider + Structured Executors', flush=True)
+        print('Hermes Core v6.4 — Fast Semantic Brain + Structured Executors', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
