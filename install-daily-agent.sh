@@ -14,7 +14,7 @@ MODEL_URL="${HERMES_DAILY_AGENT_MODEL_URL:-https://huggingface.co/ggml-org/Qwen3
 PORT="${HERMES_DAILY_AGENT_PORT:-8087}"
 THREADS="${HERMES_DAILY_AGENT_THREADS:-4}"
 CTX="${HERMES_DAILY_AGENT_CTX:-1536}"
-TIMEOUT="${HERMES_DAILY_AGENT_TIMEOUT:-6.0}"
+TIMEOUT="${HERMES_DAILY_AGENT_TIMEOUT:-10.0}"
 
 log() { printf '[daily-agent] %s\n' "$*"; }
 
@@ -147,6 +147,19 @@ log "Config: ${THREADS} threads, ctx ${CTX}, timeout ${TIMEOUT}s"
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
     log "Daily Agent pronto."
+    # Warmup sem executar ação: popula o prefixo estático no KV cache do llama.cpp.
+    if [ -x "$HERMES_HOME/core-v2/venv/bin/python" ] && [ -f "$HERMES_HOME/core-v2/conversation_brain.py" ]; then
+      (
+        cd "$HERMES_HOME/core-v2"
+        "$HERMES_HOME/core-v2/venv/bin/python" - <<'PY' >/dev/null 2>&1 || true
+from conversation_brain import decide
+from semantic_provider import llm
+decide('o que tenho amanhã', '', llm)
+PY
+      )
+      rm -f "$HERMES_HOME/core-v2/state/daily_agent_health.json"
+      log "Warmup semântico concluído."
+    fi
     exit 0
   fi
   if ! systemctl --user is-active --quiet hermes-daily-agent.service; then
