@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from typing import Any, Callable
 
-from daily_agent_examples import select_examples
+from daily_agent_contract import SYSTEM
 from time_store import DEFAULT_TZ, tz
 
 _ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
@@ -62,8 +62,6 @@ def _pick(data: dict[str, Any], long_key: str, short_key: str, default: Any = No
 
 
 def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
-    # Aceita tanto o contrato longo antigo quanto o contrato curto usado pelo
-    # modelo de 0.6B. O executor interno continua recebendo o formato completo.
     mode = _clean(_pick(data, 'mode', 'm')).casefold()
     route = _clean(_pick(data, 'route', 'r')).casefold()
     action = _clean(_pick(data, 'action', 'a')).casefold() or 'none'
@@ -92,11 +90,14 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
 
     filters: dict[str, Any] = {}
     period = _clean(_pick(data, 'period', 'p'), 40).casefold()
+    if period and period != 'unknown':
+        filters['period'] = period
+
+    # Campos objetivos ainda são aceitos para compatibilidade, mas o modelo leve
+    # não precisa produzi-los. Parsers locais extraem data/horário da frase original.
     date = _clean(_pick(data, 'date', 'd'), 40)
     hour = _to_int(_pick(data, 'hour', 'h'))
     minute = _to_int(_pick(data, 'minute', 'n'))
-    if period:
-        filters['period'] = period
     if date:
         filters['date'] = date
     if hour is not None:
@@ -119,7 +120,7 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
         'standalone_request': rewritten,
         'response': response,
         'confidence': confidence,
-        'references_previous_turn': bool(_pick(data, 'references_previous_turn', 'prev', False)),
+        'references_previous_turn': bool(_pick(data, 'references_previous_turn', 'prev', mode == 'followup')),
         'reason': _clean(_pick(data, 'reason', 'why'), 180),
         'target': {
             'entity': entity,
@@ -139,57 +140,17 @@ def _call_once(llm: Callable[..., str], prompt: str, system: str, max_tokens: in
     return _extract_json(raw)
 
 
-def _compact_examples(text: str) -> str:
-    lines: list[str] = []
-    for raw in select_examples(text, limit=3).splitlines():
-        try:
-            item = json.loads(raw)
-        except Exception:
-            continue
-        compact = {
-            'u': item.get('u'),
-            'm': item.get('mode'),
-            'r': item.get('route'),
-            'a': item.get('action'),
-            'e': item.get('entity'),
-            's': item.get('scope'),
-        }
-        lines.append(json.dumps(compact, ensure_ascii=False, separators=(',', ':')))
-    return '\n'.join(lines[:3])
-
-
 def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str, Any] | None:
     current = str(text or '').strip()
     if not current:
         return None
 
-    # O 0.6B deve classificar, não raciocinar sobre todo o estado. Mantemos só
-    # um pedaço mínimo da conversa para pronomes/follow-ups e três exemplos
-    # semanticamente próximos. Isso reduz o prompt de ~780 tokens para poucas
-    # centenas sem transformar exemplos em regras hardcoded.
-    recent = str(recent_context or '')[-260:]
-    now = datetime.now(tz(DEFAULT_TZ)).isoformat(timespec='minutes')
-    examples = _compact_examples(current)
+    # Prefixo totalmente estático = KV cache reaproveitável no llama.cpp.
+    # O estado completo nunca entra aqui. Só um contexto mínimo para referências
+    # como "isso", "ele", "o anterior"; o executor consulta os dados reais depois.
+    recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-120:]
+    now = datetime.now(tz(DEFAULT_TZ)).strftime('%Y-%m-%d %H:%M')
+    prompt = f'N:{now}\nC:{recent or "-"}\nU:{current}\nJ:'
 
-    system = (
-        '/no_think\n'
-        'Só JSON. Entenda PT-BR informal e classifique a intenção. '
-        'Nunca transforme pergunta em ação e nunca invente ID. '
-        'Use chaves curtas: m,r,a,e,s,ref,p,d,h,n,prev,c,resp,q. '
-        'm=chat|query|action|followup; '
-        'r=time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat; '
-        'a=none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule; '
-        'e=day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown; '
-        's=single|selection|all|filtered|unknown. '
-        'p=today|tomorrow|this_week|next_week|this_month|next_month quando couber. '
-        'Se faltar dado para uma ação, a=answer,r=chat e resp pergunta só o necessário.'
-    )
-    prompt = (
-        f'T:{now}\n'
-        f'EX:\n{examples}\n'
-        f'CTX:{recent or "-"}\n'
-        f'U:{current}'
-    )
-
-    parsed = _call_once(llm, prompt, system, 96)
+    parsed = _call_once(llm, prompt, SYSTEM, 64)
     return _validate(parsed, current) if parsed else None
