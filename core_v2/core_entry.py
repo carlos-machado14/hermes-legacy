@@ -160,13 +160,22 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
     context = recent_conversation(limit=12, max_chars=6000)
 
-    # A classificação semântica precisa ser pequena e rápida. Ela não deve consumir
-    # o mesmo SLA de uma resposta completa. Se o modelo estiver indisponível, o Core
-    # pode seguir para fallbacks seguros sem bloquear o Telegram por 45+ segundos.
     previous = os.environ.get('HERMES_COMPLEXITY')
     os.environ['HERMES_COMPLEXITY'] = 'fast'
     try:
-        decision = brain_decide(text, context, _original_llm)
+        try:
+            decision = brain_decide(text, context, _original_llm)
+        except Exception as exc:
+            emit(
+                'core.brain',
+                ok=False,
+                route='unknown',
+                action='none',
+                reason='brain_exception',
+                error=str(exc)[:300],
+                timeout=_is_timeout_error(exc),
+            )
+            return None, 'semantic_fallback', None
     finally:
         if previous is None:
             os.environ.pop('HERMES_COMPLEXITY', None)
@@ -236,9 +245,6 @@ def ask(text: str) -> str:
 
     reply, route_name, decision = _brain_dispatch(text)
 
-    # Resiliência local somente-leitura: se o cérebro estiver indisponível, perguntas
-    # temporais objetivamente resolvíveis pelo parser podem consultar o estado real.
-    # Não há lista de frases e nenhuma mutação é permitida nesse caminho.
     if reply is None:
         safe_reply = safe_read_fallback(text)
         if safe_reply is not None:
