@@ -12,10 +12,28 @@ import hermes_core
 from telemetry import emit
 
 _STATE = Path(__file__).resolve().parent / 'state' / 'semantic_provider_health.json'
+_ENV_FILES = [
+    Path.home() / '.config' / 'hermes' / 'brain.env',
+    Path.home() / '.hermes' / '.env',
+]
 
 
 def _env(name: str) -> str:
-    return str(os.getenv(name) or '').strip()
+    direct = str(os.getenv(name) or '').strip()
+    if direct:
+        return direct
+    for path in _ENV_FILES:
+        try:
+            for line in path.read_text(encoding='utf-8').splitlines():
+                raw = line.strip()
+                if not raw or raw.startswith('#') or '=' not in raw:
+                    continue
+                key, value = raw.split('=', 1)
+                if key.strip() == name:
+                    return value.strip().strip('"').strip("'")
+        except Exception:
+            continue
+    return ''
 
 
 def _provider() -> tuple[str, str, str | None, str]:
@@ -123,3 +141,15 @@ def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -
     if fallback is not None:
         return _request(fallback, prompt, system, max_tokens or 180)
     raise TimeoutError('semantic provider unavailable')
+
+
+def health() -> dict[str, Any]:
+    primary = _provider()
+    fallback = _fallback_provider()
+    state = _read_health()
+    return {
+        'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
+        'fallback': {'base_url': fallback[0], 'model': fallback[1], 'kind': fallback[3]} if fallback else None,
+        'circuit_open': _circuit_open(),
+        'state': state,
+    }
