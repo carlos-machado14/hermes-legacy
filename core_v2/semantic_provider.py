@@ -26,10 +26,19 @@ _MODE = {'query':'Q','action':'A','followup':'F','chat':'C'}
 _ROUTE = {'time':'T','task':'K','automation':'U','assistant':'S','research':'W','developer':'D','devops':'O','memory':'M','finance':'F','chat':'C','connected':'S','mission':'S'}
 
 _RERANK_SYSTEM = '''/no_think
-Você recebe uma mensagem em português e algumas frases de exemplo numeradas.
-Escolha SOMENTE o número da frase cujo significado e intenção são mais próximos da mensagem atual.
-Considere ação, objeto, se é pergunta ou ordem, singular/plural e contexto. Não explique.'''
+Você recebe uma mensagem em português e opções de intenção com exemplos.
+Escolha SOMENTE o número da opção que representa melhor o significado da mensagem atual.
+Dê prioridade à intenção descrita, depois à frase de exemplo. Considere ação, objeto, pergunta/ordem, singular/plural e contexto. Não explique.'''
 _INDEX_GRAMMAR = 'root ::= "0" | "1" | "2" | "3" | "4" | "5"'
+
+# Âncoras semânticas sempre presentes. Não são phrase routes: o modelo ainda escolhe
+# semanticamente entre elas e os exemplos recuperados. Elas evitam que intenções muito
+# importantes desapareçam do top-k por baixa sobreposição lexical.
+_ANCHORS: list[dict[str, Any]] = [
+    {'u':'limpa minha agenda inteira e cancela tudo que está marcado', 'o':{'mode':'action','route':'time','action':'remove','entity':'schedule','scope':'all'}},
+    {'u':'qual é minha agenda para um dia específico', 'o':{'mode':'query','route':'time','action':'list','entity':'day','scope':'filtered'}},
+    {'u':'me lembra em um dia e horário de fazer alguma coisa', 'o':{'mode':'action','route':'time','action':'create','entity':'reminder','scope':'single'}},
+]
 
 
 def _env(name: str) -> str:
@@ -100,6 +109,11 @@ def _norm(text: str) -> tuple[str, set[str]]:
     return clean, {p for p in clean.split() if len(p) > 1}
 
 
+def _signature(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    out = item.get('o') if isinstance(item.get('o'), dict) else {}
+    return (str(out.get('mode')), str(out.get('route')), str(out.get('action')), str(out.get('entity')), str(out.get('scope')))
+
+
 def _candidates(text: str, recent_context: str, limit: int = 6) -> list[dict[str, Any]]:
     query, qtokens = _norm((recent_context[-120:] + ' ' + text).strip())
     ranked: list[tuple[float, int, dict[str, Any]]] = []
@@ -115,16 +129,22 @@ def _candidates(text: str, recent_context: str, limit: int = 6) -> list[dict[str
 
     chosen: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
+
+    for anchor in _ANCHORS:
+        sig = _signature(anchor)
+        if sig not in seen:
+            seen.add(sig)
+            chosen.append(anchor)
+
     for _score, _idx, item in ranked:
-        out = item.get('o') or {}
-        signature = (str(out.get('mode')), str(out.get('route')), str(out.get('action')), str(out.get('entity')), str(out.get('scope')))
-        if signature in seen:
+        sig = _signature(item)
+        if sig in seen:
             continue
-        seen.add(signature)
+        seen.add(sig)
         chosen.append(item)
         if len(chosen) >= limit:
             break
-    return chosen
+    return chosen[:limit]
 
 
 def _to_label(item: dict[str, Any]) -> str:
@@ -138,6 +158,16 @@ def _to_label(item: dict[str, Any]) -> str:
     ])
 
 
+def _intent_hint(item: dict[str, Any]) -> str:
+    out = item.get('o') if isinstance(item.get('o'), dict) else {}
+    action = str(out.get('action') or 'none')
+    entity = str(out.get('entity') or 'unknown')
+    scope = str(out.get('scope') or 'unknown')
+    mode = str(out.get('mode') or 'chat')
+    route = str(out.get('route') or 'assistant')
+    return f'{mode}; {action}; {entity}; escopo {scope}; domínio {route}'
+
+
 def classify(text: str, recent_context: str = '') -> str:
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
@@ -149,8 +179,11 @@ def classify(text: str, recent_context: str = '') -> str:
     if not candidates:
         raise RuntimeError('daily classifier has no semantic candidates')
 
-    options = '\n'.join(f'{idx}: {item["u"]}' for idx, item in enumerate(candidates))
-    prompt = f'/no_think\nMensagem: {current}\nContexto: {recent or "-"}\nOpções:\n{options}\nNúmero:'
+    options = '\n'.join(
+        f'{idx}: intenção={_intent_hint(item)} | exemplo={item["u"]}'
+        for idx, item in enumerate(candidates)
+    )
+    prompt = f'/no_think\nMensagem atual: {current}\nContexto: {recent or "-"}\nOpções:\n{options}\nNúmero:'
     payload = {
         'model': model,
         'messages': [
@@ -180,12 +213,12 @@ def classify(text: str, recent_context: str = '') -> str:
         result = _to_label(candidates[index])
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker', selected=index)
+        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v2', selected=index)
         return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v2')
         raise
 
 
@@ -199,7 +232,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'semantic_example_reranker_v1',
+        'classifier': 'semantic_example_reranker_v2',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
