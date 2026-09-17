@@ -19,6 +19,7 @@ from intent_executor import execute as execute_intent
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from mission_router import handle as handle_mission_command
+from semantic_resilience import safe_read_fallback
 from telemetry import emit, trace_id
 from universal_router import handle as handle_universal_command
 
@@ -32,13 +33,16 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _retry_small(prompt: str, system: str) -> str | None:
     try:
-        return _original_llm(
-            prompt,
-            system=system,
-            max_tokens=180,
-        )
+        previous = os.environ.get('HERMES_COMPLEXITY')
+        os.environ['HERMES_COMPLEXITY'] = 'fast'
+        return _original_llm(prompt, system=system, max_tokens=120)
     except Exception:
         return None
+    finally:
+        if previous is None:
+            os.environ.pop('HERMES_COMPLEXITY', None)
+        else:
+            os.environ['HERMES_COMPLEXITY'] = previous
 
 
 def _contextual_llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
@@ -155,8 +159,22 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
     context = recent_conversation(limit=12, max_chars=6000)
-    decision = brain_decide(text, context, _original_llm)
+
+    # A classificação semântica precisa ser pequena e rápida. Ela não deve consumir
+    # o mesmo SLA de uma resposta completa. Se o modelo estiver indisponível, o Core
+    # pode seguir para fallbacks seguros sem bloquear o Telegram por 45+ segundos.
+    previous = os.environ.get('HERMES_COMPLEXITY')
+    os.environ['HERMES_COMPLEXITY'] = 'fast'
+    try:
+        decision = brain_decide(text, context, _original_llm)
+    finally:
+        if previous is None:
+            os.environ.pop('HERMES_COMPLEXITY', None)
+        else:
+            os.environ['HERMES_COMPLEXITY'] = previous
+
     if not decision or float(decision.get('confidence') or 0.0) < 0.5:
+        emit('core.brain', ok=False, route='unknown', action='none', reason='unavailable_or_low_confidence')
         return None, 'semantic_fallback', decision
 
     route = str(decision.get('route') or 'chat')
@@ -217,6 +235,16 @@ def ask(text: str) -> str:
     os.environ['HERMES_COMPLEXITY'] = profile.tier
 
     reply, route_name, decision = _brain_dispatch(text)
+
+    # Resiliência local somente-leitura: se o cérebro estiver indisponível, perguntas
+    # temporais objetivamente resolvíveis pelo parser podem consultar o estado real.
+    # Não há lista de frases e nenhuma mutação é permitida nesse caminho.
+    if reply is None:
+        safe_reply = safe_read_fallback(text)
+        if safe_reply is not None:
+            reply = safe_reply
+            route_name = 'safe_read_resilience'
+
     if reply is None:
         prompt = str(decision.get('standalone_request') or text) if decision else text
         reply = hermes_core.ask(prompt)
@@ -237,7 +265,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v6.0 — Semantic Brain + Structured Executors', flush=True)
+        print('Hermes Core v6.1 — Semantic Brain + Structured Executors + Resilience', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
