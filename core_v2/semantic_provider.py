@@ -12,27 +12,41 @@ import httpx
 from telemetry import emit
 
 _STATE = Path(__file__).resolve().parent / 'state' / 'daily_agent_health.json'
-_ENV_FILES = [
-    Path.home() / '.config' / 'hermes' / 'daily-agent.env',
-    Path.home() / '.hermes' / '.env',
-]
+_ENV_FILES = [Path.home() / '.config' / 'hermes' / 'daily-agent.env', Path.home() / '.hermes' / '.env']
 _DEFAULT_BASE_URL = 'http://127.0.0.1:8087/v1'
 _DEFAULT_MODEL = 'Qwen3-0.6B-Q4_0.gguf'
 
+# O classificador devolve exatamente cinco códigos. Evitamos nomes de campos A/E/S/M/R
+# no enunciado porque o 0.6B estava copiando literalmente esses placeholders.
 _CLASSIFIER_SYSTEM = '''/no_think
-Classifique a intenção em PT-BR. Responda SOMENTE A|E|S|M|R.
-A ação: L=listar C=criar R=remover U=alterar P=pausar V=retomar X=executar D=concluir G=reagendar N=responder H=buscar S=status.
-E entidade: A=agenda/dia M=lembrete L=alerta E=evento C=compromisso R=rotina T=tarefa S=agenda inteira O=outro.
-S escopo: 1=um A=todos F=filtrado P=seleção/contexto U=incerto.
-M modo: Q=pergunta A=ação F=continuação C=conversa.
-R rota: T=tempo/agenda K=tarefa U=automação S=assistente W=pesquisa D=desenvolvimento O=devops M=memória F=finanças C=conversa.
-Pergunta nunca vira ação. Se não souber use N|O|U|C|S.
+Você classifica uma mensagem curta em PT-BR.
+Responda somente cinco códigos separados por |, nesta ordem:
+1 ação, 2 entidade, 3 escopo, 4 modo, 5 rota.
+
+AÇÃO: L listar; C criar; R remover; U alterar; P pausar; V retomar; X executar; D concluir; G reagendar; N responder; H buscar; S status.
+ENTIDADE: A agenda/dia; M lembrete; L alerta; E evento; C compromisso; R rotina; T tarefa; S agenda inteira; O outro.
+ESCOPO: 1 um; A todos; F filtrado; P seleção/contexto; U incerto.
+MODO: Q pergunta; A ação; F continuação; C conversa.
+ROTA: T tempo/agenda; K tarefa; U automação; S assistente; W pesquisa; D desenvolvimento; O devops; M memória; F finanças; C conversa.
+
+Não copie nomes de campos. Escolha um código real de cada tabela.
+Pergunta nunca vira ação. Se não souber: N|O|U|C|S.
+
 Exemplos:
 o que tenho sábado => L|A|F|Q|T
 me lembra amanhã 10h de revisar => C|M|1|A|T
 cancela todos meus compromissos da agenda, quero resetar => R|S|A|A|T
 terminei a tarefa do contrato => D|T|F|A|K
 procura as notícias de hoje => H|O|U|Q|W'''
+
+# Grammar do llama.cpp: impede saída incompleta/inválida e força exatamente cinco escolhas.
+_CLASSIFIER_GRAMMAR = r'''root ::= action "|" entity "|" scope "|" mode "|" route
+action ::= "L" | "C" | "R" | "U" | "P" | "V" | "X" | "D" | "G" | "N" | "H" | "S"
+entity ::= "A" | "M" | "L" | "E" | "C" | "R" | "T" | "S" | "O"
+scope ::= "1" | "A" | "F" | "P" | "U"
+mode ::= "Q" | "A" | "F" | "C"
+route ::= "T" | "K" | "U" | "S" | "W" | "D" | "O" | "M" | "F" | "C"'''
+_VALID = re.compile(r'^[LCRUPVXDGHNS]\|[AMLECRTSO]\|[1AFPU]\|[QAFC]\|[TKUSWDOMFC]$')
 
 
 def _env(name: str) -> str:
@@ -89,12 +103,7 @@ def _mark_failure(error: str) -> None:
     state = _read_health()
     failures = int(state.get('failures') or 0) + 1
     cooldown = 5 if failures >= 3 else 0
-    _write_health({
-        'failures': failures,
-        'open_until': int(time.time()) + cooldown if cooldown else 0,
-        'last_error_at': int(time.time()),
-        'error': error[:300],
-    })
+    _write_health({'failures': failures, 'open_until': int(time.time()) + cooldown if cooldown else 0, 'last_error_at': int(time.time()), 'error': error[:300]})
 
 
 def _timeout_seconds() -> float:
@@ -102,27 +111,25 @@ def _timeout_seconds() -> float:
 
 
 def classify(text: str, recent_context: str = '') -> str:
-    """Classifica intenção com saída mínima, sempre no modelo local."""
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
 
     base_url, model, _key, provider_kind = _provider()
-    timeout_seconds = _timeout_seconds()
     recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-100:]
     current = re.sub(r'\s+', ' ', str(text or '')).strip()[:700]
     payload = {
         'model': model,
         'messages': [
             {'role': 'system', 'content': _CLASSIFIER_SYSTEM},
-            {'role': 'user', 'content': f'/no_think\nC:{recent or "-"}\nU:{current}\nR:'},
+            {'role': 'user', 'content': f'/no_think\nContexto: {recent or "-"}\nMensagem: {current}\nClassificação:'},
         ],
         'temperature': 0,
-        'max_tokens': 12,
+        'max_tokens': 16,
         'stop': ['\n'],
-        # Builds antigos do llama.cpp/Qwen3 respeitam o kwarg por request;
-        # builds novos usam os flags do servidor definidos pelo instalador.
+        'grammar': _CLASSIFIER_GRAMMAR,
         'chat_template_kwargs': {'enable_thinking': False},
     }
+    timeout_seconds = _timeout_seconds()
     timeout = httpx.Timeout(connect=1.0, read=timeout_seconds, write=timeout_seconds, pool=1.0)
     started = time.perf_counter()
     try:
@@ -131,26 +138,22 @@ def classify(text: str, recent_context: str = '') -> str:
             response.raise_for_status()
             data = response.json()
         message = ((data.get('choices') or [{}])[0].get('message') or {})
-        result = str(message.get('content') or '').strip()
+        result = str(message.get('content') or '').strip().upper()
         elapsed_ms = (time.perf_counter() - started) * 1000
         if not result:
             reasoning = str(message.get('reasoning_content') or '').strip()
             if reasoning:
                 raise RuntimeError('daily classifier returned reasoning only')
             raise RuntimeError('daily classifier returned empty content')
-        if '<think' in result.casefold() or result.casefold().startswith('think'):
-            raise RuntimeError('daily classifier thinking mode is still enabled')
-        if not re.search(r'[LCRUPVXDGHNS]\s*\|', result.upper()):
+        if not _VALID.fullmatch(result):
             raise RuntimeError(f'daily classifier invalid label: {result[:80]}')
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms,
-             prompt_chars=len(current) + len(recent), output_chars=len(result), mode='label_classifier')
+        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(current) + len(recent), output_chars=len(result), mode='label_classifier')
         return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms,
-             error=str(exc)[:300], mode='label_classifier')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='label_classifier')
         raise
 
 
@@ -164,7 +167,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'compact_labels_v1',
+        'classifier': 'compact_labels_v2_grammar',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
