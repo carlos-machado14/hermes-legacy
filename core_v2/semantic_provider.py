@@ -96,7 +96,9 @@ def _mark_failure(provider: str, error: str) -> None:
 
 def _request(endpoint: tuple[str, str, str | None, str], prompt: str, system: str, max_tokens: int) -> str:
     base_url, model, api_key, provider_kind = endpoint
-    timeout_seconds = max(1.5, min(8.0, float(_env('HERMES_BRAIN_TIMEOUT') or 4.0)))
+    # O brain recebe um prompt muito menor que a resposta geral. Sete segundos dão
+    # espaço ao modelo local de 1.7B sem deixar o gateway preso por dezenas de segundos.
+    timeout_seconds = max(2.0, min(10.0, float(_env('HERMES_BRAIN_TIMEOUT') or 7.0)))
     headers = {'Content-Type': 'application/json'}
     if api_key:
         headers['Authorization'] = f'Bearer {api_key}'
@@ -107,7 +109,7 @@ def _request(endpoint: tuple[str, str, str | None, str], prompt: str, system: st
             {'role': 'user', 'content': prompt},
         ],
         'temperature': 0,
-        'max_tokens': min(max(80, int(max_tokens or 180)), 240),
+        'max_tokens': min(max(64, int(max_tokens or 160)), 180),
     }
     timeout = httpx.Timeout(connect=min(2.0, timeout_seconds), read=timeout_seconds, write=timeout_seconds, pool=2.0)
     started = time.perf_counter()
@@ -131,15 +133,15 @@ def _request(endpoint: tuple[str, str, str | None, str], prompt: str, system: st
 
 
 def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    system = system or 'Retorne somente JSON válido.'
+    system = system or '/no_think\nRetorne somente JSON válido.'
     if not _circuit_open():
         try:
-            return _request(_provider(), prompt, system, max_tokens or 180)
+            return _request(_provider(), prompt, system, max_tokens or 160)
         except Exception:
             pass
     fallback = _fallback_provider()
     if fallback is not None:
-        return _request(fallback, prompt, system, max_tokens or 180)
+        return _request(fallback, prompt, system, max_tokens or 160)
     raise TimeoutError('semantic provider unavailable')
 
 
@@ -152,4 +154,5 @@ def health() -> dict[str, Any]:
         'fallback': {'base_url': fallback[0], 'model': fallback[1], 'kind': fallback[3]} if fallback else None,
         'circuit_open': _circuit_open(),
         'state': state,
+        'timeout_seconds': max(2.0, min(10.0, float(_env('HERMES_BRAIN_TIMEOUT') or 7.0))),
     }
