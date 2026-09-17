@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from day_overview import overview
@@ -13,10 +14,10 @@ def _relative_day(text: str) -> str | None:
     This is temporal data extraction, not intent routing. It deliberately does not
     decide what action the user wants and never mutates state.
     """
-    normalized = f" {norm(text)} "
-    if ' amanha ' in normalized:
+    normalized = norm(text)
+    if re.search(r'\bamanha\b', normalized):
         return 'tomorrow'
-    if ' hoje ' in normalized:
+    if re.search(r'\bhoje\b', normalized):
         return 'today'
     return None
 
