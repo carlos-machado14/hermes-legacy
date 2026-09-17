@@ -32,9 +32,9 @@ Escolha SOMENTE o número da opção que representa melhor o significado da mens
 Dê prioridade à intenção descrita, depois à frase de exemplo. Considere ação, objeto, pergunta/ordem e singular/plural. Não explique.'''
 _INDEX_GRAMMAR = 'root ::= "0" | "1" | "2" | "3" | "4" | "5"'
 
-# Âncoras semânticas sempre presentes. Não são phrase routes: o modelo ainda escolhe
-# semanticamente entre elas e os exemplos recuperados. Elas evitam que intenções muito
-# importantes desapareçam do top-k por baixa sobreposição lexical.
+# Exemplos canônicos extras para intenções importantes. Eles NÃO são injetados em toda
+# classificação: entram no mesmo ranking dos demais exemplos e só chegam ao modelo se
+# forem lexicalmente/semanticamente relevantes para a mensagem atual.
 _ANCHORS: list[dict[str, Any]] = [
     {'u':'limpa minha agenda inteira e cancela tudo que está marcado', 'o':{'mode':'action','route':'time','action':'remove','entity':'schedule','scope':'all'}},
     {'u':'qual é minha agenda para um dia específico', 'o':{'mode':'query','route':'time','action':'list','entity':'day','scope':'filtered'}},
@@ -110,44 +110,25 @@ def _norm(text: str) -> tuple[str, set[str]]:
     return clean, {p for p in clean.split() if len(p) > 1}
 
 
-def _signature(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
-    out = item.get('o') if isinstance(item.get('o'), dict) else {}
-    return (str(out.get('mode')), str(out.get('route')), str(out.get('action')), str(out.get('entity')), str(out.get('scope')))
+def _score_candidate(query: str, qtokens: set[str], item: dict[str, Any]) -> float:
+    sample, stokens = _norm(item.get('u') or '')
+    overlap = len(qtokens & stokens)
+    union = max(1, len(qtokens | stokens))
+    lexical = overlap / union
+    sequence = SequenceMatcher(None, query, sample).ratio()
+    return lexical * 0.65 + sequence * 0.35 + min(overlap, 3) * 0.04
 
 
 def _candidates(text: str, limit: int = 6) -> list[dict[str, Any]]:
-    # A recuperação usa SOMENTE a mensagem atual. O histórico do Telegram não pode
-    # transformar uma nova consulta em continuação da ação anterior.
+    # Somente a mensagem atual participa da recuperação. Âncoras e corpus disputam
+    # igualmente o top-k; nenhuma intenção recebe vaga garantida.
     query, qtokens = _norm(text)
+    pool = [*_ANCHORS, *EXAMPLES]
     ranked: list[tuple[float, int, dict[str, Any]]] = []
-    for idx, item in enumerate(EXAMPLES):
-        sample, stokens = _norm(item.get('u') or '')
-        overlap = len(qtokens & stokens)
-        union = max(1, len(qtokens | stokens))
-        lexical = overlap / union
-        sequence = SequenceMatcher(None, query, sample).ratio()
-        score = lexical * 0.65 + sequence * 0.35 + min(overlap, 3) * 0.04
-        ranked.append((score, -idx, item))
+    for idx, item in enumerate(pool):
+        ranked.append((_score_candidate(query, qtokens, item), -idx, item))
     ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
-
-    chosen: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
-
-    for anchor in _ANCHORS:
-        sig = _signature(anchor)
-        if sig not in seen:
-            seen.add(sig)
-            chosen.append(anchor)
-
-    for _score, _idx, item in ranked:
-        sig = _signature(item)
-        if sig in seen:
-            continue
-        seen.add(sig)
-        chosen.append(item)
-        if len(chosen) >= limit:
-            break
-    return chosen[:limit]
+    return [item for _score, _idx, item in ranked[:limit]]
 
 
 def _to_label(item: dict[str, Any]) -> str:
@@ -215,12 +196,12 @@ def classify(text: str, recent_context: str = '') -> str:
         result = _to_label(candidates[index])
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v3', selected=index)
+        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v4', selected=index)
         return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v3')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v4')
         raise
 
 
@@ -234,7 +215,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'semantic_example_reranker_v3_no_context_poisoning',
+        'classifier': 'semantic_example_reranker_v4_ranked_anchors',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
