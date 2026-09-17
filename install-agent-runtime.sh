@@ -46,18 +46,12 @@ log "Atualizando Hermes Core..."
 chmod +x "$ROOT/install-core-v2.sh"
 "$ROOT/install-core-v2.sh"
 
-# O cérebro operacional usa um modelo local separado e minúsculo. Não usamos
-# OmniRoute, OpenAI ou qualquer outro provider remoto para classificação diária.
+# Reaplicamos a unidade sempre que o runtime é atualizado. O GGUF já baixado é
+# reutilizado, então isso só atualiza threads/contexto/timeout e reinicia o serviço.
+log "Atualizando Daily Agent local dedicado..."
+chmod +x "$ROOT/install-daily-agent.sh"
+"$ROOT/install-daily-agent.sh"
 DAILY_BASE="$(daily_base_url)"
-DAILY_HEALTH="${DAILY_BASE%/v1}/health"
-if ! curl -fsS "$DAILY_HEALTH" >/dev/null 2>&1; then
-  log "Daily Agent local não está ativo; instalando Qwen3 0.6B dedicado..."
-  chmod +x "$ROOT/install-daily-agent.sh"
-  "$ROOT/install-daily-agent.sh"
-  DAILY_BASE="$(daily_base_url)"
-else
-  log "Daily Agent local já está saudável."
-fi
 
 mkdir -p "$HERMES_HOME/plugins" "$HERMES_HOME/backups"
 

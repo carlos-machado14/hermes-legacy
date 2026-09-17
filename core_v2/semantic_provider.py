@@ -38,7 +38,6 @@ def _env(name: str) -> str:
 
 
 def _provider() -> tuple[str, str, str | None, str]:
-    # Strictly local: no remote API keys or remote fallback are ever considered here.
     base_url = (_env('HERMES_DAILY_AGENT_BASE_URL') or _DEFAULT_BASE_URL).rstrip('/')
     model = _env('HERMES_DAILY_AGENT_MODEL') or _DEFAULT_MODEL
     return base_url, model, None, 'daily_agent_local'
@@ -73,7 +72,7 @@ def _mark_success(elapsed_ms: float) -> None:
 def _mark_failure(error: str) -> None:
     state = _read_health()
     failures = int(state.get('failures') or 0) + 1
-    cooldown = 20 if failures >= 2 else 0
+    cooldown = 10 if failures >= 2 else 0
     _write_health({
         'failures': failures,
         'open_until': int(time.time()) + cooldown if cooldown else 0,
@@ -83,7 +82,7 @@ def _mark_failure(error: str) -> None:
 
 
 def _timeout_seconds() -> float:
-    return max(1.0, min(6.0, float(_env('HERMES_DAILY_AGENT_TIMEOUT') or 3.5)))
+    return max(1.0, min(8.0, float(_env('HERMES_DAILY_AGENT_TIMEOUT') or 6.0)))
 
 
 def _request(prompt: str, system: str, max_tokens: int) -> str:
@@ -96,7 +95,8 @@ def _request(prompt: str, system: str, max_tokens: int) -> str:
             {'role': 'user', 'content': prompt},
         ],
         'temperature': 0,
-        'max_tokens': min(max(64, int(max_tokens or 128)), 144),
+        'max_tokens': min(max(48, int(max_tokens or 96)), 112),
+        'response_format': {'type': 'json_object'},
     }
     timeout = httpx.Timeout(connect=1.0, read=timeout_seconds, write=timeout_seconds, pool=1.0)
     started = time.perf_counter()
@@ -122,7 +122,7 @@ def _request(prompt: str, system: str, max_tokens: int) -> str:
 def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
-    return _request(prompt, system or '/no_think\nRetorne somente JSON válido.', max_tokens or 128)
+    return _request(prompt, system or '/no_think\nRetorne somente JSON válido.', max_tokens or 96)
 
 
 def health() -> dict[str, Any]:
