@@ -160,8 +160,10 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
     context = recent_conversation(limit=12, max_chars=6000)
 
-    previous = os.environ.get('HERMES_COMPLEXITY')
+    previous_complexity = os.environ.get('HERMES_COMPLEXITY')
+    previous_fast_timeout = os.environ.get('HERMES_FAST_LLM_TIMEOUT')
     os.environ['HERMES_COMPLEXITY'] = 'fast'
+    os.environ['HERMES_FAST_LLM_TIMEOUT'] = '4'
     try:
         try:
             decision = brain_decide(text, context, _original_llm)
@@ -177,10 +179,14 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
             )
             return None, 'semantic_fallback', None
     finally:
-        if previous is None:
+        if previous_complexity is None:
             os.environ.pop('HERMES_COMPLEXITY', None)
         else:
-            os.environ['HERMES_COMPLEXITY'] = previous
+            os.environ['HERMES_COMPLEXITY'] = previous_complexity
+        if previous_fast_timeout is None:
+            os.environ.pop('HERMES_FAST_LLM_TIMEOUT', None)
+        else:
+            os.environ['HERMES_FAST_LLM_TIMEOUT'] = previous_fast_timeout
 
     if not decision or float(decision.get('confidence') or 0.0) < 0.5:
         emit('core.brain', ok=False, route='unknown', action='none', reason='unavailable_or_low_confidence')
@@ -271,7 +277,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v6.1 — Semantic Brain + Structured Executors + Resilience', flush=True)
+        print('Hermes Core v6.2 — Semantic Brain + Structured Executors + Bounded Resilience', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
