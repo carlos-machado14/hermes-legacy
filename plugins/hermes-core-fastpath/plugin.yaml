@@ -1,5 +1,5 @@
 name: hermes-core-fastpath
-version: 3.1.0
-description: Semantic Gateway do Hermes: encaminha mensagens ao Core semântico e mantém execução concorrente no Telegram.
+version: 3.1.1
+description: "Semantic Gateway do Hermes: encaminha mensagens ao Core semântico e mantém execução concorrente no Telegram."
 provides_hooks:
   - pre_gateway_dispatch
