@@ -7,6 +7,7 @@ PLUGIN_SRC="$ROOT/plugins/hermes-core-fastpath"
 PLUGIN_DST="$HERMES_HOME/plugins/hermes-core-fastpath"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP="$HERMES_HOME/backups/hermes-core-fastpath-$STAMP"
+DAILY_ENV="$HOME/.config/hermes/daily-agent.env"
 
 log() { printf '[runtime-sync] %s\n' "$*"; }
 
@@ -33,16 +34,27 @@ find_valid_backup() {
   return 1
 }
 
+daily_base_url() {
+  local value=""
+  if [ -f "$DAILY_ENV" ]; then
+    value="$(sed -n 's/^HERMES_DAILY_AGENT_BASE_URL=//p' "$DAILY_ENV" | tail -n1)"
+  fi
+  printf '%s\n' "${value:-http://127.0.0.1:${HERMES_DAILY_AGENT_PORT:-8087}/v1}"
+}
+
 log "Atualizando Hermes Core..."
 chmod +x "$ROOT/install-core-v2.sh"
 "$ROOT/install-core-v2.sh"
 
 # O cérebro operacional usa um modelo local separado e minúsculo. Não usamos
 # OmniRoute, OpenAI ou qualquer outro provider remoto para classificação diária.
-if ! curl -fsS http://127.0.0.1:${HERMES_DAILY_AGENT_PORT:-8087}/health >/dev/null 2>&1; then
+DAILY_BASE="$(daily_base_url)"
+DAILY_HEALTH="${DAILY_BASE%/v1}/health"
+if ! curl -fsS "$DAILY_HEALTH" >/dev/null 2>&1; then
   log "Daily Agent local não está ativo; instalando Qwen3 0.6B dedicado..."
   chmod +x "$ROOT/install-daily-agent.sh"
   "$ROOT/install-daily-agent.sh"
+  DAILY_BASE="$(daily_base_url)"
 else
   log "Daily Agent local já está saudável."
 fi
@@ -112,5 +124,5 @@ if grep -R -n -F 'Não consegui obter uma resposta confiável dentro do limite l
 fi
 
 log "Runtime sincronizado e manifest preservado."
-log "Daily Agent: Qwen3 0.6B local em 127.0.0.1:${HERMES_DAILY_AGENT_PORT:-8087}."
+log "Daily Agent local: ${DAILY_BASE}."
 log "Backup desta execucao: $BACKUP"
