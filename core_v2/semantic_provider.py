@@ -4,11 +4,14 @@ import json
 import os
 import re
 import time
+import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from daily_agent_examples import EXAMPLES
 from telemetry import emit
 
 _STATE = Path(__file__).resolve().parent / 'state' / 'daily_agent_health.json'
@@ -16,37 +19,17 @@ _ENV_FILES = [Path.home() / '.config' / 'hermes' / 'daily-agent.env', Path.home(
 _DEFAULT_BASE_URL = 'http://127.0.0.1:8087/v1'
 _DEFAULT_MODEL = 'Qwen3-0.6B-Q4_0.gguf'
 
-# O classificador devolve exatamente cinco códigos. Evitamos nomes de campos A/E/S/M/R
-# no enunciado porque o 0.6B estava copiando literalmente esses placeholders.
-_CLASSIFIER_SYSTEM = '''/no_think
-Você classifica uma mensagem curta em PT-BR.
-Responda somente cinco códigos separados por |, nesta ordem:
-1 ação, 2 entidade, 3 escopo, 4 modo, 5 rota.
+_ACTION = {'list':'L','create':'C','remove':'R','update':'U','pause':'P','resume':'V','run':'X','complete':'D','reschedule':'G','answer':'N','search':'H','status':'S','none':'N'}
+_ENTITY = {'day':'A','reminder':'M','alert':'L','event':'E','commitment':'C','routine':'R','task':'T','schedule':'S','automation':'S','unknown':'O'}
+_SCOPE = {'single':'1','all':'A','filtered':'F','selection':'P','unknown':'U'}
+_MODE = {'query':'Q','action':'A','followup':'F','chat':'C'}
+_ROUTE = {'time':'T','task':'K','automation':'U','assistant':'S','research':'W','developer':'D','devops':'O','memory':'M','finance':'F','chat':'C','connected':'S','mission':'S'}
 
-AÇÃO: L listar; C criar; R remover; U alterar; P pausar; V retomar; X executar; D concluir; G reagendar; N responder; H buscar; S status.
-ENTIDADE: A agenda/dia; M lembrete; L alerta; E evento; C compromisso; R rotina; T tarefa; S agenda inteira; O outro.
-ESCOPO: 1 um; A todos; F filtrado; P seleção/contexto; U incerto.
-MODO: Q pergunta; A ação; F continuação; C conversa.
-ROTA: T tempo/agenda; K tarefa; U automação; S assistente; W pesquisa; D desenvolvimento; O devops; M memória; F finanças; C conversa.
-
-Não copie nomes de campos. Escolha um código real de cada tabela.
-Pergunta nunca vira ação. Se não souber: N|O|U|C|S.
-
-Exemplos:
-o que tenho sábado => L|A|F|Q|T
-me lembra amanhã 10h de revisar => C|M|1|A|T
-cancela todos meus compromissos da agenda, quero resetar => R|S|A|A|T
-terminei a tarefa do contrato => D|T|F|A|K
-procura as notícias de hoje => H|O|U|Q|W'''
-
-# Grammar do llama.cpp: impede saída incompleta/inválida e força exatamente cinco escolhas.
-_CLASSIFIER_GRAMMAR = r'''root ::= action "|" entity "|" scope "|" mode "|" route
-action ::= "L" | "C" | "R" | "U" | "P" | "V" | "X" | "D" | "G" | "N" | "H" | "S"
-entity ::= "A" | "M" | "L" | "E" | "C" | "R" | "T" | "S" | "O"
-scope ::= "1" | "A" | "F" | "P" | "U"
-mode ::= "Q" | "A" | "F" | "C"
-route ::= "T" | "K" | "U" | "S" | "W" | "D" | "O" | "M" | "F" | "C"'''
-_VALID = re.compile(r'^[LCRUPVXDGHNS]\|[AMLECRTSO]\|[1AFPU]\|[QAFC]\|[TKUSWDOMFC]$')
+_RERANK_SYSTEM = '''/no_think
+Você recebe uma mensagem em português e algumas frases de exemplo numeradas.
+Escolha SOMENTE o número da frase cujo significado e intenção são mais próximos da mensagem atual.
+Considere ação, objeto, se é pergunta ou ordem, singular/plural e contexto. Não explique.'''
+_INDEX_GRAMMAR = 'root ::= "0" | "1" | "2" | "3" | "4" | "5"'
 
 
 def _env(name: str) -> str:
@@ -110,23 +93,73 @@ def _timeout_seconds() -> float:
     return max(2.0, min(10.0, float(_env('HERMES_DAILY_AGENT_TIMEOUT') or 6.0)))
 
 
+def _norm(text: str) -> tuple[str, set[str]]:
+    value = unicodedata.normalize('NFKD', str(text or '').casefold())
+    value = ''.join(ch for ch in value if not unicodedata.combining(ch))
+    clean = ' '.join(re.findall(r'[a-z0-9]+', value))
+    return clean, {p for p in clean.split() if len(p) > 1}
+
+
+def _candidates(text: str, recent_context: str, limit: int = 6) -> list[dict[str, Any]]:
+    query, qtokens = _norm((recent_context[-120:] + ' ' + text).strip())
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for idx, item in enumerate(EXAMPLES):
+        sample, stokens = _norm(item.get('u') or '')
+        overlap = len(qtokens & stokens)
+        union = max(1, len(qtokens | stokens))
+        lexical = overlap / union
+        sequence = SequenceMatcher(None, query, sample).ratio()
+        score = lexical * 0.65 + sequence * 0.35 + min(overlap, 3) * 0.04
+        ranked.append((score, -idx, item))
+    ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
+
+    chosen: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for _score, _idx, item in ranked:
+        out = item.get('o') or {}
+        signature = (str(out.get('mode')), str(out.get('route')), str(out.get('action')), str(out.get('entity')), str(out.get('scope')))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def _to_label(item: dict[str, Any]) -> str:
+    out = item.get('o') if isinstance(item.get('o'), dict) else {}
+    return '|'.join([
+        _ACTION.get(str(out.get('action') or 'none'), 'N'),
+        _ENTITY.get(str(out.get('entity') or 'unknown'), 'O'),
+        _SCOPE.get(str(out.get('scope') or 'unknown'), 'U'),
+        _MODE.get(str(out.get('mode') or 'chat'), 'C'),
+        _ROUTE.get(str(out.get('route') or 'assistant'), 'S'),
+    ])
+
+
 def classify(text: str, recent_context: str = '') -> str:
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
 
     base_url, model, _key, provider_kind = _provider()
-    recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-100:]
     current = re.sub(r'\s+', ' ', str(text or '')).strip()[:700]
+    recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-120:]
+    candidates = _candidates(current, recent, 6)
+    if not candidates:
+        raise RuntimeError('daily classifier has no semantic candidates')
+
+    options = '\n'.join(f'{idx}: {item["u"]}' for idx, item in enumerate(candidates))
+    prompt = f'/no_think\nMensagem: {current}\nContexto: {recent or "-"}\nOpções:\n{options}\nNúmero:'
     payload = {
         'model': model,
         'messages': [
-            {'role': 'system', 'content': _CLASSIFIER_SYSTEM},
-            {'role': 'user', 'content': f'/no_think\nContexto: {recent or "-"}\nMensagem: {current}\nClassificação:'},
+            {'role': 'system', 'content': _RERANK_SYSTEM},
+            {'role': 'user', 'content': prompt},
         ],
         'temperature': 0,
-        'max_tokens': 16,
-        'stop': ['\n'],
-        'grammar': _CLASSIFIER_GRAMMAR,
+        'max_tokens': 2,
+        'grammar': _INDEX_GRAMMAR,
         'chat_template_kwargs': {'enable_thinking': False},
     }
     timeout_seconds = _timeout_seconds()
@@ -138,22 +171,21 @@ def classify(text: str, recent_context: str = '') -> str:
             response.raise_for_status()
             data = response.json()
         message = ((data.get('choices') or [{}])[0].get('message') or {})
-        result = str(message.get('content') or '').strip().upper()
+        raw = str(message.get('content') or '').strip()
+        if not re.fullmatch(r'[0-5]', raw):
+            raise RuntimeError(f'daily reranker invalid index: {raw[:40]}')
+        index = int(raw)
+        if index >= len(candidates):
+            raise RuntimeError(f'daily reranker index out of range: {index}')
+        result = _to_label(candidates[index])
         elapsed_ms = (time.perf_counter() - started) * 1000
-        if not result:
-            reasoning = str(message.get('reasoning_content') or '').strip()
-            if reasoning:
-                raise RuntimeError('daily classifier returned reasoning only')
-            raise RuntimeError('daily classifier returned empty content')
-        if not _VALID.fullmatch(result):
-            raise RuntimeError(f'daily classifier invalid label: {result[:80]}')
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(current) + len(recent), output_chars=len(result), mode='label_classifier')
+        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker', selected=index)
         return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='label_classifier')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker')
         raise
 
 
@@ -167,7 +199,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'compact_labels_v2_grammar',
+        'classifier': 'semantic_example_reranker_v1',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
