@@ -19,6 +19,7 @@ from intent_executor import execute as execute_intent
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from mission_router import handle as handle_mission_command
+from semantic_provider import llm as semantic_llm
 from semantic_resilience import safe_read_fallback
 from telemetry import emit, trace_id
 from universal_router import handle as handle_universal_command
@@ -28,7 +29,7 @@ _original_llm = hermes_core.llm
 
 def _is_timeout_error(exc: Exception) -> bool:
     text = str(exc).casefold()
-    return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout'))
+    return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout', 'semantic provider unavailable'))
 
 
 def _retry_small(prompt: str, system: str) -> str | None:
@@ -159,37 +160,31 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
     context = recent_conversation(limit=12, max_chars=6000)
-
-    previous_complexity = os.environ.get('HERMES_COMPLEXITY')
-    previous_fast_timeout = os.environ.get('HERMES_FAST_LLM_TIMEOUT')
-    os.environ['HERMES_COMPLEXITY'] = 'fast'
-    os.environ['HERMES_FAST_LLM_TIMEOUT'] = '4'
+    started = time.perf_counter()
     try:
-        try:
-            decision = brain_decide(text, context, _original_llm)
-        except Exception as exc:
-            emit(
-                'core.brain',
-                ok=False,
-                route='unknown',
-                action='none',
-                reason='brain_exception',
-                error=str(exc)[:300],
-                timeout=_is_timeout_error(exc),
-            )
-            return None, 'semantic_fallback', None
-    finally:
-        if previous_complexity is None:
-            os.environ.pop('HERMES_COMPLEXITY', None)
-        else:
-            os.environ['HERMES_COMPLEXITY'] = previous_complexity
-        if previous_fast_timeout is None:
-            os.environ.pop('HERMES_FAST_LLM_TIMEOUT', None)
-        else:
-            os.environ['HERMES_FAST_LLM_TIMEOUT'] = previous_fast_timeout
+        decision = brain_decide(text, context, semantic_llm)
+    except Exception as exc:
+        emit(
+            'core.brain',
+            ok=False,
+            route='unknown',
+            action='none',
+            reason='brain_exception',
+            error=str(exc)[:300],
+            timeout=_is_timeout_error(exc),
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+        return None, 'semantic_fallback', None
 
     if not decision or float(decision.get('confidence') or 0.0) < 0.5:
-        emit('core.brain', ok=False, route='unknown', action='none', reason='unavailable_or_low_confidence')
+        emit(
+            'core.brain',
+            ok=False,
+            route='unknown',
+            action='none',
+            reason='unavailable_or_low_confidence',
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
         return None, 'semantic_fallback', decision
 
     route = str(decision.get('route') or 'chat')
@@ -204,6 +199,7 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
         mode=decision.get('mode'),
         confidence=decision.get('confidence'),
         references_previous_turn=decision.get('references_previous_turn'),
+        elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
     try:
@@ -277,7 +273,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v6.2 — Semantic Brain + Structured Executors + Bounded Resilience', flush=True)
+        print('Hermes Core v6.3 — Isolated Semantic Provider + Structured Executors', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
