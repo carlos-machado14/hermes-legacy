@@ -7,13 +7,7 @@ from agent_state import get as get_agent_state, refresh as refresh_agent_state
 from context_builder import snapshot, primary_goal, ranked_tasks
 from day_overview import overview as day_overview
 from decision_log import record, summary as decisions_summary
-from temporal_parser import norm
 from time_router import agenda
-
-
-def _looks_like_legacy_reminder_task(title: str) -> bool:
-    t = norm(title)
-    return any(x in t for x in ('me avisa ', 'me avise ', 'me lembra ', 'me lembre '))
 
 
 def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -22,7 +16,7 @@ def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]
     overdue: list[dict] = []
     other: list[dict] = []
     for task in tasks:
-        if _looks_like_legacy_reminder_task(str(task.get('title') or '')):
+        if str(task.get('kind') or 'action') != 'action':
             continue
         due = str(task.get('due') or '').strip()
         if not due:
@@ -127,7 +121,7 @@ def recommendation() -> str:
 
 def continue_last() -> str:
     state = get_agent_state(refresh_state=True)
-    actions = [x for x in list(state.get('next_actions') or []) if not _looks_like_legacy_reminder_task(str(x.get('title') or ''))]
+    actions = [x for x in list(state.get('next_actions') or []) if str(x.get('kind') or 'action') == 'action']
     if actions:
         return f"Vamos continuar por: {actions[0].get('title')}."
     from decision_log import recent
