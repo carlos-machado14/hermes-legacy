@@ -147,17 +147,16 @@ log "Config: ${THREADS} threads, ctx ${CTX}, timeout ${TIMEOUT}s"
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
     log "Daily Agent pronto."
-    if [ -x "$HERMES_HOME/core-v2/venv/bin/python" ] && [ -f "$HERMES_HOME/core-v2/conversation_brain.py" ]; then
+    if [ -x "$HERMES_HOME/core-v2/venv/bin/python" ] && [ -f "$HERMES_HOME/core-v2/semantic_provider.py" ]; then
       (
         cd "$HERMES_HOME/core-v2"
         "$HERMES_HOME/core-v2/venv/bin/python" - <<'PY' >/dev/null 2>&1 || true
-from conversation_brain import decide
-from semantic_provider import llm
-decide('o que tenho amanhã', '', llm)
+from semantic_provider import classify
+classify('o que tenho amanhã', '')
 PY
       )
       rm -f "$HERMES_HOME/core-v2/state/daily_agent_health.json"
-      log "Warmup semântico concluído."
+      log "Warmup do classificador compacto concluído."
     fi
     exit 0
   fi
