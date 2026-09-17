@@ -24,19 +24,43 @@ _ENTITY = {'day':'A','reminder':'M','alert':'L','event':'E','commitment':'C','ro
 _SCOPE = {'single':'1','all':'A','filtered':'F','selection':'P','unknown':'U'}
 _MODE = {'query':'Q','action':'A','followup':'F','chat':'C'}
 _ROUTE = {'time':'T','task':'K','automation':'U','assistant':'S','research':'W','developer':'D','devops':'O','memory':'M','finance':'F','chat':'C','connected':'S','mission':'S'}
+_MUTATING_ACTIONS = {'create','remove','update','pause','resume','run','complete','reschedule'}
+
+_ACTION_PT = {
+    'create': 'criar', 'remove': 'cancelar/remover', 'update': 'alterar', 'pause': 'pausar',
+    'resume': 'retomar', 'run': 'executar agora', 'complete': 'concluir', 'reschedule': 'reagendar',
+    'list': 'consultar/listar', 'status': 'consultar status', 'answer': 'responder', 'search': 'buscar',
+}
+_ENTITY_PT = {
+    'day': 'agenda de um dia/período', 'reminder': 'lembrete', 'alert': 'alerta', 'event': 'evento',
+    'commitment': 'compromisso', 'routine': 'rotina', 'task': 'tarefa', 'schedule': 'agenda inteira / qualquer item agendado',
+    'automation': 'automação', 'unknown': 'item não especificado',
+}
+_SCOPE_PT = {
+    'single': 'um item específico', 'all': 'todos os itens desse alvo', 'filtered': 'itens filtrados pela descrição/data',
+    'selection': 'itens já selecionados no contexto', 'unknown': 'abrangência não definida',
+}
 
 _RERANK_SYSTEM = '''/no_think
 Você recebe UMA mensagem atual em português e opções de intenção com exemplos.
 Classifique SOMENTE a mensagem atual. Não herde a ação de mensagens anteriores.
 Escolha SOMENTE o número da opção que representa melhor o significado da mensagem atual.
 Dê prioridade à intenção descrita, depois à frase de exemplo. Considere ação, objeto, pergunta/ordem e singular/plural. Não explique.'''
+
+_VERIFY_SYSTEM = '''/no_think
+Você está validando uma ação que pode alterar dados.
+A ação principal já foi identificada. Sua única tarefa agora é escolher o ALVO e a ABRANGÊNCIA corretos da mensagem atual.
+Diferencie com cuidado: agenda inteira versus lembretes; todos versus um item versus filtro específico.
+Escolha SOMENTE o número da opção correta. Não explique.'''
+
 _INDEX_GRAMMAR = 'root ::= "0" | "1" | "2" | "3" | "4" | "5"'
 
-# Exemplos canônicos extras para intenções importantes. Eles NÃO são injetados em toda
-# classificação: entram no mesmo ranking dos demais exemplos e só chegam ao modelo se
-# forem lexicalmente/semanticamente relevantes para a mensagem atual.
+# Exemplos canônicos extras para intenções importantes. Eles entram no mesmo ranking
+# semântico do corpus e nunca funcionam como roteamento por frase exata.
 _ANCHORS: list[dict[str, Any]] = [
     {'u':'limpa minha agenda inteira e cancela tudo que está marcado', 'o':{'mode':'action','route':'time','action':'remove','entity':'schedule','scope':'all'}},
+    {'u':'apaga todos os compromissos e deixa minha agenda vazia', 'o':{'mode':'action','route':'time','action':'remove','entity':'schedule','scope':'all'}},
+    {'u':'quero zerar tudo que tenho agendado', 'o':{'mode':'action','route':'time','action':'remove','entity':'schedule','scope':'all'}},
     {'u':'qual é minha agenda para um dia específico', 'o':{'mode':'query','route':'time','action':'list','entity':'day','scope':'filtered'}},
     {'u':'me lembra em um dia e horário de fazer alguma coisa', 'o':{'mode':'action','route':'time','action':'create','entity':'reminder','scope':'single'}},
 ]
@@ -119,16 +143,57 @@ def _score_candidate(query: str, qtokens: set[str], item: dict[str, Any]) -> flo
     return lexical * 0.65 + sequence * 0.35 + min(overlap, 3) * 0.04
 
 
-def _candidates(text: str, limit: int = 6) -> list[dict[str, Any]]:
-    # Somente a mensagem atual participa da recuperação. Âncoras e corpus disputam
-    # igualmente o top-k; nenhuma intenção recebe vaga garantida.
+def _signature(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    out = item.get('o') if isinstance(item.get('o'), dict) else {}
+    return (
+        str(out.get('mode') or 'chat'), str(out.get('route') or 'assistant'), str(out.get('action') or 'none'),
+        str(out.get('entity') or 'unknown'), str(out.get('scope') or 'unknown'),
+    )
+
+
+def _ranked_pool(text: str) -> list[tuple[float, int, dict[str, Any]]]:
     query, qtokens = _norm(text)
     pool = [*_ANCHORS, *EXAMPLES]
     ranked: list[tuple[float, int, dict[str, Any]]] = []
     for idx, item in enumerate(pool):
         ranked.append((_score_candidate(query, qtokens, item), -idx, item))
     ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
-    return [item for _score, _idx, item in ranked[:limit]]
+    return ranked
+
+
+def _candidates(text: str, limit: int = 6) -> list[dict[str, Any]]:
+    # Uma opção por assinatura evita gastar as seis vagas com paráfrases da mesma intenção.
+    chosen: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for _score, _idx, item in _ranked_pool(text):
+        sig = _signature(item)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def _mutation_candidates(text: str, action: str, limit: int = 6) -> list[dict[str, Any]]:
+    # Segunda passagem para mutações: mantém a ação fixa e compara apenas alvo+escopo.
+    # Isso impede que uma escolha próxima lexicalmente (ex.: "lembrete") transforme
+    # "zerar a agenda" em remoção de um subconjunto.
+    chosen: list[dict[str, Any]] = []
+    seen_target: set[tuple[str, str]] = set()
+    for _score, _idx, item in _ranked_pool(text):
+        out = item.get('o') if isinstance(item.get('o'), dict) else {}
+        if str(out.get('action') or 'none') != action:
+            continue
+        target_sig = (str(out.get('entity') or 'unknown'), str(out.get('scope') or 'unknown'))
+        if target_sig in seen_target:
+            continue
+        seen_target.add(target_sig)
+        chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
 
 
 def _to_label(item: dict[str, Any]) -> str:
@@ -152,6 +217,39 @@ def _intent_hint(item: dict[str, Any]) -> str:
     return f'{mode}; {action}; {entity}; escopo {scope}; domínio {route}'
 
 
+def _target_hint(item: dict[str, Any]) -> str:
+    out = item.get('o') if isinstance(item.get('o'), dict) else {}
+    action = str(out.get('action') or 'none')
+    entity = str(out.get('entity') or 'unknown')
+    scope = str(out.get('scope') or 'unknown')
+    return f'ação={_ACTION_PT.get(action, action)}; alvo={_ENTITY_PT.get(entity, entity)}; abrangência={_SCOPE_PT.get(scope, scope)}'
+
+
+def _choose_index(base_url: str, model: str, system: str, prompt: str, timeout_seconds: float) -> tuple[int, float]:
+    payload = {
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': system},
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0,
+        'max_tokens': 2,
+        'grammar': _INDEX_GRAMMAR,
+        'chat_template_kwargs': {'enable_thinking': False},
+    }
+    timeout = httpx.Timeout(connect=1.0, read=timeout_seconds, write=timeout_seconds, pool=1.0)
+    started = time.perf_counter()
+    with httpx.Client(timeout=timeout, headers={'Content-Type': 'application/json'}) as client:
+        response = client.post(f'{base_url}/chat/completions', json=payload)
+        response.raise_for_status()
+        data = response.json()
+    message = ((data.get('choices') or [{}])[0].get('message') or {})
+    raw = str(message.get('content') or '').strip()
+    if not re.fullmatch(r'[0-5]', raw):
+        raise RuntimeError(f'daily reranker invalid index: {raw[:40]}')
+    return int(raw), (time.perf_counter() - started) * 1000
+
+
 def classify(text: str, recent_context: str = '') -> str:
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
@@ -167,41 +265,51 @@ def classify(text: str, recent_context: str = '') -> str:
         for idx, item in enumerate(candidates)
     )
     prompt = f'/no_think\nMensagem atual: {current}\nOpções:\n{options}\nNúmero:'
-    payload = {
-        'model': model,
-        'messages': [
-            {'role': 'system', 'content': _RERANK_SYSTEM},
-            {'role': 'user', 'content': prompt},
-        ],
-        'temperature': 0,
-        'max_tokens': 2,
-        'grammar': _INDEX_GRAMMAR,
-        'chat_template_kwargs': {'enable_thinking': False},
-    }
     timeout_seconds = _timeout_seconds()
-    timeout = httpx.Timeout(connect=1.0, read=timeout_seconds, write=timeout_seconds, pool=1.0)
-    started = time.perf_counter()
+    total_started = time.perf_counter()
     try:
-        with httpx.Client(timeout=timeout, headers={'Content-Type': 'application/json'}) as client:
-            response = client.post(f'{base_url}/chat/completions', json=payload)
-            response.raise_for_status()
-            data = response.json()
-        message = ((data.get('choices') or [{}])[0].get('message') or {})
-        raw = str(message.get('content') or '').strip()
-        if not re.fullmatch(r'[0-5]', raw):
-            raise RuntimeError(f'daily reranker invalid index: {raw[:40]}')
-        index = int(raw)
+        index, first_ms = _choose_index(base_url, model, _RERANK_SYSTEM, prompt, timeout_seconds)
         if index >= len(candidates):
             raise RuntimeError(f'daily reranker index out of range: {index}')
-        result = _to_label(candidates[index])
-        elapsed_ms = (time.perf_counter() - started) * 1000
+        selected = candidates[index]
+        selected_out = selected.get('o') if isinstance(selected.get('o'), dict) else {}
+        selected_action = str(selected_out.get('action') or 'none')
+        verifier_ms = 0.0
+        verified = False
+
+        # Mutações merecem uma segunda decisão curta e independente focada somente em alvo+escopo.
+        # O Qwen continua decidindo semanticamente; não existe frase/regex especial para "resetar".
+        if selected_action in _MUTATING_ACTIONS:
+            mutation_options = _mutation_candidates(current, selected_action, 6)
+            if len(mutation_options) > 1:
+                target_options = '\n'.join(
+                    f'{idx}: {_target_hint(item)} | exemplo={item["u"]}'
+                    for idx, item in enumerate(mutation_options)
+                )
+                verify_prompt = (
+                    f'/no_think\nMensagem atual: {current}\n'
+                    f'Ação principal: {_ACTION_PT.get(selected_action, selected_action)}\n'
+                    f'Escolha alvo e abrangência:\n{target_options}\nNúmero:'
+                )
+                verify_index, verifier_ms = _choose_index(base_url, model, _VERIFY_SYSTEM, verify_prompt, timeout_seconds)
+                if verify_index >= len(mutation_options):
+                    raise RuntimeError(f'daily mutation verifier index out of range: {verify_index}')
+                selected = mutation_options[verify_index]
+                verified = True
+
+        result = _to_label(selected)
+        elapsed_ms = (time.perf_counter() - total_started) * 1000
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v4', selected=index)
+        emit(
+            'brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms,
+            prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v5', selected=index,
+            mutation_verified=verified, first_pass_ms=round(first_ms, 1), verifier_ms=round(verifier_ms, 1),
+        )
         return result
     except Exception as exc:
-        elapsed_ms = (time.perf_counter() - started) * 1000
+        elapsed_ms = (time.perf_counter() - total_started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v4')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v5')
         raise
 
 
@@ -215,7 +323,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'semantic_example_reranker_v4_ranked_anchors',
+        'classifier': 'semantic_example_reranker_v5_mutation_verifier',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
