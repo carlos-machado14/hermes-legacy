@@ -19,6 +19,7 @@ from conversation_memory import add as remember_turn, compact as recent_conversa
 from developer_router import handle as handle_developer_command
 from domain_router import classify as classify_domain
 from finance_router import handle as handle_finance_command
+from intent_executor import execute as execute_intent
 from local_fastpath import handle as handle_local_fastpath
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
@@ -224,6 +225,18 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
         references_previous_turn=decision.get('references_previous_turn'),
     )
 
+    # Regra central: o cérebro produz uma intenção estruturada e o executor age
+    # sobre essa estrutura diretamente. Não voltamos a interpretar a frase para
+    # descobrir de novo o que o usuário quis dizer.
+    try:
+        structured_reply = execute_intent(decision, text)
+    except Exception as exc:
+        emit('core.intent_executor', ok=False, error=str(exc)[:300])
+        structured_reply = None
+    if structured_reply is not None:
+        emit('core.intent_executor', ok=True, route=route, action=action)
+        return structured_reply, 'brain_structured_executor', decision
+
     if route == 'chat':
         return None, 'brain_chat', decision
 
@@ -234,6 +247,9 @@ def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
         return reply, 'brain_task', decision
 
     if route == 'time':
+        # Criação/listagem ainda pode usar o roteador temporal. Mutações simples já
+        # foram tentadas pelo executor estruturado acima; o parser fica apenas como
+        # compatibilidade/fallback, não como fonte principal de intenção.
         if action in {'remove', 'pause', 'resume'}:
             reply = _call(handle_conversation_action, standalone)
             if reply is None and standalone != text:
@@ -318,7 +334,6 @@ def ask(text: str) -> str:
         reply = direct
         route_name = 'deterministic_literal'
     else:
-        # Comandos locais simples devem responder em milissegundos e nunca depender do modelo.
         local_reply = _call(handle_local_fastpath, text)
         if local_reply is not None:
             reply = local_reply
@@ -361,7 +376,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v5.1 — LLM-first + Local Fastpath', flush=True)
+        print('Hermes Core v5.2 — Semantic Brain + Structured Executor + Local Read Fastpath', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)
