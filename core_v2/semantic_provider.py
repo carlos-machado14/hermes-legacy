@@ -26,9 +26,10 @@ _MODE = {'query':'Q','action':'A','followup':'F','chat':'C'}
 _ROUTE = {'time':'T','task':'K','automation':'U','assistant':'S','research':'W','developer':'D','devops':'O','memory':'M','finance':'F','chat':'C','connected':'S','mission':'S'}
 
 _RERANK_SYSTEM = '''/no_think
-Você recebe uma mensagem em português e opções de intenção com exemplos.
+Você recebe UMA mensagem atual em português e opções de intenção com exemplos.
+Classifique SOMENTE a mensagem atual. Não herde a ação de mensagens anteriores.
 Escolha SOMENTE o número da opção que representa melhor o significado da mensagem atual.
-Dê prioridade à intenção descrita, depois à frase de exemplo. Considere ação, objeto, pergunta/ordem, singular/plural e contexto. Não explique.'''
+Dê prioridade à intenção descrita, depois à frase de exemplo. Considere ação, objeto, pergunta/ordem e singular/plural. Não explique.'''
 _INDEX_GRAMMAR = 'root ::= "0" | "1" | "2" | "3" | "4" | "5"'
 
 # Âncoras semânticas sempre presentes. Não são phrase routes: o modelo ainda escolhe
@@ -114,8 +115,10 @@ def _signature(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
     return (str(out.get('mode')), str(out.get('route')), str(out.get('action')), str(out.get('entity')), str(out.get('scope')))
 
 
-def _candidates(text: str, recent_context: str, limit: int = 6) -> list[dict[str, Any]]:
-    query, qtokens = _norm((recent_context[-120:] + ' ' + text).strip())
+def _candidates(text: str, limit: int = 6) -> list[dict[str, Any]]:
+    # A recuperação usa SOMENTE a mensagem atual. O histórico do Telegram não pode
+    # transformar uma nova consulta em continuação da ação anterior.
+    query, qtokens = _norm(text)
     ranked: list[tuple[float, int, dict[str, Any]]] = []
     for idx, item in enumerate(EXAMPLES):
         sample, stokens = _norm(item.get('u') or '')
@@ -174,8 +177,7 @@ def classify(text: str, recent_context: str = '') -> str:
 
     base_url, model, _key, provider_kind = _provider()
     current = re.sub(r'\s+', ' ', str(text or '')).strip()[:700]
-    recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-120:]
-    candidates = _candidates(current, recent, 6)
+    candidates = _candidates(current, 6)
     if not candidates:
         raise RuntimeError('daily classifier has no semantic candidates')
 
@@ -183,7 +185,7 @@ def classify(text: str, recent_context: str = '') -> str:
         f'{idx}: intenção={_intent_hint(item)} | exemplo={item["u"]}'
         for idx, item in enumerate(candidates)
     )
-    prompt = f'/no_think\nMensagem atual: {current}\nContexto: {recent or "-"}\nOpções:\n{options}\nNúmero:'
+    prompt = f'/no_think\nMensagem atual: {current}\nOpções:\n{options}\nNúmero:'
     payload = {
         'model': model,
         'messages': [
@@ -213,12 +215,12 @@ def classify(text: str, recent_context: str = '') -> str:
         result = _to_label(candidates[index])
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_success(elapsed_ms)
-        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v2', selected=index)
+        emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, prompt_chars=len(prompt), output_chars=len(result), mode='example_reranker_v3', selected=index)
         return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         _mark_failure(str(exc))
-        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v2')
+        emit('brain.provider', ok=False, provider=provider_kind, model=model, elapsed_ms=elapsed_ms, error=str(exc)[:300], mode='example_reranker_v3')
         raise
 
 
@@ -232,7 +234,7 @@ def health() -> dict[str, Any]:
         'primary': {'base_url': primary[0], 'model': primary[1], 'kind': primary[3]},
         'fallback': None,
         'remote_enabled': False,
-        'classifier': 'semantic_example_reranker_v2',
+        'classifier': 'semantic_example_reranker_v3_no_context_poisoning',
         'circuit_open': _circuit_open(),
         'state': _read_health(),
         'timeout_seconds': _timeout_seconds(),
