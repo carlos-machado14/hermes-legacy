@@ -10,12 +10,11 @@ SERVICE="$SYSTEMD_USER/hermes-daily-agent.service"
 MODEL_DIR="$HERMES_HOME/models/daily-agent"
 MODEL_NAME="${HERMES_DAILY_AGENT_MODEL:-Qwen3-0.6B-Q4_0.gguf}"
 MODEL_FILE="$MODEL_DIR/$MODEL_NAME"
-# Fonte GGUF mantida pelo projeto ggml-org/llama.cpp. O repositório Qwen oficial
-# não expõe este Q4_0 nesse caminho, o que causava 404 na instalação.
 MODEL_URL="${HERMES_DAILY_AGENT_MODEL_URL:-https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true}"
 PORT="${HERMES_DAILY_AGENT_PORT:-8087}"
-THREADS="${HERMES_DAILY_AGENT_THREADS:-2}"
-CTX="${HERMES_DAILY_AGENT_CTX:-2048}"
+THREADS="${HERMES_DAILY_AGENT_THREADS:-4}"
+CTX="${HERMES_DAILY_AGENT_CTX:-1536}"
+TIMEOUT="${HERMES_DAILY_AGENT_TIMEOUT:-6.0}"
 
 log() { printf '[daily-agent] %s\n' "$*"; }
 
@@ -76,10 +75,6 @@ fi
 
 mkdir -p "$SYSTEMD_USER" "$ENV_DIR" "$HERMES_HOME/core-v2/state" "$MODEL_DIR"
 
-# O llama-server instalado nesta VPS foi compilado sem suporte HTTPS. Por isso o
-# modelo é baixado uma vez por curl e o serviço sempre carrega um arquivo GGUF local.
-# Também descartamos arquivos muito pequenos para nunca tratar página de erro ou
-# ponteiro incompleto como um modelo válido.
 if [ -s "$MODEL_FILE" ]; then
   SIZE="$(stat -c%s "$MODEL_FILE" 2>/dev/null || echo 0)"
   if [ "$SIZE" -lt 100000000 ]; then
@@ -108,8 +103,6 @@ if [ ! -s "$MODEL_FILE" ]; then
   log "Download concluído: $((SIZE / 1024 / 1024)) MB."
 fi
 
-# Pare a unidade antiga antes de testar a porta, evitando corrida entre enable --now
-# e restart. Se 8087 estiver ocupado por outro processo, seleciona outra porta local.
 systemctl --user stop hermes-daily-agent.service 2>/dev/null || true
 PORT="$(choose_port "$PORT" || true)"
 if [ -z "$PORT" ]; then
@@ -121,7 +114,7 @@ cat > "$ENV_FILE" <<EOF
 # Hermes Daily Agent - somente local
 HERMES_DAILY_AGENT_BASE_URL=http://127.0.0.1:${PORT}/v1
 HERMES_DAILY_AGENT_MODEL=${MODEL_NAME}
-HERMES_DAILY_AGENT_TIMEOUT=3.5
+HERMES_DAILY_AGENT_TIMEOUT=${TIMEOUT}
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -149,6 +142,7 @@ systemctl --user restart hermes-daily-agent.service
 
 log "Modelo diário local: ${MODEL_FILE}"
 log "Endpoint local: http://127.0.0.1:${PORT}/v1"
+log "Config: ${THREADS} threads, ctx ${CTX}, timeout ${TIMEOUT}s"
 
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
