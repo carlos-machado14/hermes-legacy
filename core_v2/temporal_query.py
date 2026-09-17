@@ -83,7 +83,6 @@ def _day_of_month(text: str, today: date) -> date | None:
 
 def _weekday_date(text: str, today: date) -> date | None:
     found: tuple[str, int] | None = None
-    # nomes mais longos primeiro para evitar casar "sexta" antes de "sexta-feira"
     for name, weekday in sorted(WEEKDAYS.items(), key=lambda pair: len(pair[0]), reverse=True):
         n = norm(name)
         if re.search(rf'\b{re.escape(n)}\b', text):
@@ -91,20 +90,20 @@ def _weekday_date(text: str, today: date) -> date | None:
             break
     if found is None:
         return None
+
     _, weekday = found
+    if re.search(r'\bsemana\s+que\s+vem\b', text):
+        next_monday = today + timedelta(days=(7 - today.weekday()))
+        return next_monday + timedelta(days=weekday)
+
     days = (weekday - today.weekday()) % 7
-    explicit_next = bool(re.search(r'\b(?:proxim[ao]|semana\s+que\s+vem)\b', text))
-    if days == 0 and explicit_next:
+    if days == 0 and re.search(r'\bproxim[ao]\b', text):
         days = 7
     return today + timedelta(days=days)
 
 
 def resolve_temporal_range(raw: str, *, today: date | None = None) -> TemporalRange | None:
-    """Extrai apenas referência temporal objetiva de uma consulta.
-
-    Não decide intenção e não executa ações. Serve para consultas read-only e pode ser
-    usada mesmo quando o modelo semântico estiver indisponível.
-    """
+    """Extrai referência temporal objetiva sem decidir intenção nem executar ações."""
     current = today or _today()
     text = norm(raw)
     if not text:
@@ -119,6 +118,15 @@ def resolve_temporal_range(raw: str, *, today: date | None = None) -> TemporalRa
     if re.search(r'\bhoje\b', text):
         return TemporalRange(current, current, 'hoje')
 
+    m = re.search(r'\bdaqui\s+a\s+(\d+)\s+dias?\b', text)
+    if m:
+        target = current + timedelta(days=int(m.group(1)))
+        return TemporalRange(target, target, target.strftime('%d/%m/%Y'))
+
+    target = _explicit_numeric(text, current) or _named_month_date(text, current) or _day_of_month(text, current) or _weekday_date(text, current)
+    if target is not None:
+        return TemporalRange(target, target, target.strftime('%d/%m/%Y'))
+
     if re.search(r'\b(?:semana\s+que\s+vem|proxima\s+semana)\b', text):
         next_monday = current + timedelta(days=(7 - current.weekday()))
         return TemporalRange(next_monday, next_monday + timedelta(days=6), 'semana que vem')
@@ -132,14 +140,5 @@ def resolve_temporal_range(raw: str, *, today: date | None = None) -> TemporalRa
         return TemporalRange(start, _month_end(year, month), 'mês que vem')
     if re.search(r'\b(?:este\s+mes|esse\s+mes|neste\s+mes)\b', text):
         return TemporalRange(current, _month_end(current.year, current.month), 'este mês')
-
-    target = _explicit_numeric(text, current) or _named_month_date(text, current) or _day_of_month(text, current) or _weekday_date(text, current)
-    if target is not None:
-        return TemporalRange(target, target, target.strftime('%d/%m/%Y'))
-
-    m = re.search(r'\bdaqui\s+a\s+(\d+)\s+dias?\b', text)
-    if m:
-        target = current + timedelta(days=int(m.group(1)))
-        return TemporalRange(target, target, target.strftime('%d/%m/%Y'))
 
     return None
