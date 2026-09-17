@@ -53,7 +53,7 @@ def _clean_ids(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     out: list[str] = []
-    for item in value[:80]:
+    for item in value[:40]:
         ref = _clean(item, 64)
         if re.fullmatch(r'[0-9a-fA-F]{6,32}', ref) and ref not in out:
             out.append(ref)
@@ -64,13 +64,13 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
     mode = _clean(data.get('mode')).casefold()
     route = _clean(data.get('route')).casefold()
     action = _clean(data.get('action')).casefold() or 'none'
-    rewritten = _clean(data.get('standalone_request'), 2200) or current
-    response = _clean(data.get('response'), 5000)
+    rewritten = _clean(data.get('standalone_request'), 1200) or current
+    response = _clean(data.get('response'), 2400)
     confidence = data.get('confidence', 0.0)
     target = data.get('target') if isinstance(data.get('target'), dict) else {}
     entity = _clean(target.get('entity')).casefold() or 'unknown'
     scope = _clean(target.get('scope')).casefold() or 'unknown'
-    reference = _clean(target.get('reference'), 800)
+    reference = _clean(target.get('reference'), 500)
     ids = _clean_ids(target.get('ids'))
     filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
 
@@ -98,7 +98,7 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
         'response': response,
         'confidence': confidence,
         'references_previous_turn': bool(data.get('references_previous_turn')),
-        'reason': _clean(data.get('reason'), 300),
+        'reason': _clean(data.get('reason'), 240),
         'target': {
             'entity': entity,
             'scope': scope,
@@ -112,26 +112,22 @@ def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
 def _entity_catalog() -> str:
     payload: dict[str, Any] = {'schedules': [], 'tasks': []}
     try:
-        for item in list_schedules(status='active', limit=60):
+        for item in list_schedules(status='active', limit=24):
             payload['schedules'].append({
                 'id': item.get('id'),
                 'kind': item.get('kind'),
-                'title': item.get('title'),
-                'message': item.get('message'),
-                'next_run_at': item.get('next_run_at'),
-                'timezone': item.get('timezone'),
-                'recurrence': item.get('recurrence'),
+                'title': _clean(item.get('title') or item.get('message'), 100),
+                'next': item.get('next_run_at'),
             })
     except Exception:
         pass
     try:
-        for item in list_tasks(status='todo')[:60]:
+        for item in list_tasks(status='todo')[:24]:
             payload['tasks'].append({
                 'id': item.get('id'),
-                'title': item.get('title'),
+                'title': _clean(item.get('title'), 100),
                 'priority': item.get('priority'),
                 'due': item.get('due'),
-                'kind': item.get('kind'),
             })
     except Exception:
         pass
@@ -150,43 +146,39 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
     current = str(text or '').strip()
     if not current:
         return None
-    recent = str(recent_context or '')[-6000:]
+    recent = str(recent_context or '')[-3000:]
     try:
         refresh_agent_state(current_context=current)
-        state = operational_state(max_actions=6)
+        state = operational_state(max_actions=4)
     except Exception:
         state = ''
 
     now = datetime.now(tz(DEFAULT_TZ)).isoformat()
     catalog = _entity_catalog()
     system = (
-        'Você é o núcleo semântico do Hermes. Interprete linguagem natural pelo significado, contexto e estado atual, sem palavras-chave, frases especiais ou exemplos de comandos. '
-        'Retorne somente JSON válido. Uma pergunta nunca deve virar mutação. Quando uma ação depende de um item já conhecido, use os IDs do catálogo quando houver correspondência confiável. '
-        'Se houver ambiguidade que impeça agir com segurança, retorne route=chat, action=answer e use response para pedir apenas a informação indispensável. '
-        'Para conversa comum, retorne route=chat, action=answer e escreva a resposta em response. '
-        'Filtros temporais devem ser estruturados em target.filters usando period, date, hour e minute quando aplicável. '
+        'Você é o núcleo semântico do Hermes. Interprete a mensagem pelo significado, contexto e estado atual. '
+        'Retorne somente JSON válido e compacto. Perguntas nunca viram mutações. Use IDs do catálogo somente quando houver correspondência confiável. '
+        'Se faltar informação indispensável para agir com segurança, use route=chat, action=answer e response com uma pergunta curta. '
+        'Conversa comum usa route=chat, action=answer. Filtros temporais ficam em target.filters com period, date, hour e minute quando aplicável. '
         'Schema: '
         '{"mode":"chat|query|action|followup",'
         '"route":"time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat",'
         '"action":"none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule",'
         '"standalone_request":"pedido autossuficiente",'
-        '"response":"resposta apenas quando route=chat/action=answer",'
+        '"response":"resposta curta quando route=chat/action=answer",'
         '"references_previous_turn":true|false,'
         '"target":{"entity":"day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown",'
         '"scope":"single|selection|all|filtered|unknown",'
-        '"reference":"descrição sem inventar dados",'
-        '"ids":[],"filters":{}},'
+        '"reference":"descrição","ids":[],"filters":{}},'
         '"confidence":0.0,"reason":"curto"}'
     )
     prompt = (
-        f'DATA_HORA_ATUAL:{now}\n'
-        + (f'ESTADO_OPERACIONAL:\n{state}\n' if state else '')
-        + f'CATALOGO_DE_ENTIDADES:\n{catalog}\n'
-        + f'CONVERSA_RECENTE:\n{recent or "(vazia)"}\n'
-        + f'MENSAGEM_ATUAL:\n{current}'
+        f'AGORA:{now}\n'
+        + (f'ESTADO:{state}\n' if state else '')
+        + f'ENTIDADES:{catalog}\n'
+        + f'CONVERSA:{recent or "(vazia)"}\n'
+        + f'MENSAGEM:{current}'
     )
 
-    parsed = _call_once(llm, prompt, system, 520)
-    if parsed is None:
-        parsed = _call_once(llm, prompt, system, 260)
+    parsed = _call_once(llm, prompt, system, 220)
     return _validate(parsed, current) if parsed else None
