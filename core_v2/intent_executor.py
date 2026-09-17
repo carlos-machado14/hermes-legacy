@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
 from conversation_memory import recent
-from day_overview import overview as day_overview
+from day_overview import overview_range
 from task_manager import complete_task, create_task, list_tasks, update_task
 from temporal_parser import humanize, parse, tz
 from time_store import (
@@ -83,25 +82,98 @@ def _similarity(reference: str, item: dict[str, Any]) -> float:
     return score
 
 
-def _filter_schedules(rows: list[dict[str, Any]], target: dict[str, Any]) -> list[dict[str, Any]]:
-    filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
-    hour = filters.get('hour')
-    minute = filters.get('minute')
-    if hour is not None:
+def _occurs_on(item: dict[str, Any], target_date: date) -> datetime | None:
+    zone = tz(item.get('timezone') or DEFAULT_TZ)
+    start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, tzinfo=zone)
+    end = start + timedelta(days=1)
+    cursor = int(start.timestamp()) - 1
+    for _ in range(200):
+        ts = compute_next(item.get('recurrence') or {}, cursor, item.get('timezone') or DEFAULT_TZ)
+        if ts is None:
+            return None
+        dt = datetime.fromtimestamp(int(ts), zone)
+        if dt >= end:
+            return None
+        if dt >= start:
+            return dt
+        cursor = int(ts)
+    return None
+
+
+def _date_range(filters: dict[str, Any]) -> tuple[date | None, date | None, str]:
+    zone = tz(DEFAULT_TZ)
+    today = datetime.now(zone).date()
+    raw_date = str(filters.get('date') or '').strip()
+    if raw_date:
         try:
-            hh = int(hour)
-            mm = int(minute) if minute is not None else None
-            filtered: list[dict[str, Any]] = []
-            for item in rows:
-                next_run = item.get('next_run_at')
-                if not next_run:
-                    continue
-                dt = datetime.fromtimestamp(int(next_run), tz(item.get('timezone') or DEFAULT_TZ))
-                if dt.hour == hh and (mm is None or dt.minute == mm):
-                    filtered.append(item)
-            rows = filtered
+            target = datetime.fromisoformat(raw_date).date()
+            return target, target, target.strftime('%d/%m/%Y')
         except Exception:
             pass
+
+    raw_start = str(filters.get('date_start') or '').strip()
+    raw_end = str(filters.get('date_end') or '').strip()
+    if raw_start and raw_end:
+        try:
+            start = datetime.fromisoformat(raw_start).date()
+            end = datetime.fromisoformat(raw_end).date()
+            return start, end, f'{start:%d/%m} a {end:%d/%m/%Y}'
+        except Exception:
+            pass
+
+    period = str(filters.get('period') or '').casefold()
+    if period == 'today':
+        return today, today, 'hoje'
+    if period == 'tomorrow':
+        target = today + timedelta(days=1)
+        return target, target, 'amanhã'
+    return None, None, period
+
+
+def _filter_schedules(rows: list[dict[str, Any]], target: dict[str, Any]) -> list[dict[str, Any]]:
+    filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
+    start, end, _label_text = _date_range(filters)
+    hour = filters.get('hour')
+    minute = filters.get('minute')
+
+    if start is not None and end is not None:
+        filtered: list[dict[str, Any]] = []
+        day_count = min(62, max(1, (end - start).days + 1))
+        for item in rows:
+            matched = False
+            for offset in range(day_count):
+                occurrence = _occurs_on(item, start + timedelta(days=offset))
+                if occurrence is None:
+                    continue
+                if hour is not None:
+                    try:
+                        hh = int(hour)
+                        mm = int(minute) if minute is not None else None
+                        if occurrence.hour != hh or (mm is not None and occurrence.minute != mm):
+                            continue
+                    except Exception:
+                        pass
+                matched = True
+                break
+            if matched:
+                filtered.append(item)
+        return filtered
+
+    if hour is not None:
+        filtered = []
+        for item in rows:
+            next_run = item.get('next_run_at')
+            if not next_run:
+                continue
+            try:
+                dt = datetime.fromtimestamp(int(next_run), tz(item.get('timezone') or DEFAULT_TZ))
+                hh = int(hour)
+                mm = int(minute) if minute is not None else None
+                if dt.hour == hh and (mm is None or dt.minute == mm):
+                    filtered.append(item)
+            except Exception:
+                continue
+        rows = filtered
     return rows
 
 
@@ -110,6 +182,7 @@ def _schedule_matches(target: dict[str, Any]) -> list[dict[str, Any]]:
     entity = str(target.get('entity') or 'unknown').casefold()
     ids = [str(x) for x in (target.get('ids') or []) if x]
     reference = str(target.get('reference') or '').strip()
+    filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
 
     rows = list_schedules(status='active', limit=1000)
     kinds = _entity_kinds(entity)
@@ -136,6 +209,11 @@ def _schedule_matches(target: dict[str, Any]) -> list[dict[str, Any]]:
         if ranked and ranked[0][0] >= 0.55:
             best = ranked[0][0]
             return [item for score, item in ranked if score >= max(0.55, best - 0.03)]
+
+    # Quando a intenção já foi classificada semanticamente como filtrada e existe
+    # um filtro objetivo de data/horário, o filtro local é suficiente para seleção.
+    if scope == 'filtered' and filters:
+        return rows
     return []
 
 
@@ -159,88 +237,40 @@ def _task_matches(target: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _target_day(filters: dict[str, Any]) -> tuple[datetime.date | None, str]:
-    zone = tz(DEFAULT_TZ)
-    today = datetime.now(zone).date()
-    period = str(filters.get('period') or '').casefold()
-    raw_date = str(filters.get('date') or '').strip()
-    if raw_date:
-        try:
-            return datetime.fromisoformat(raw_date).date(), raw_date
-        except Exception:
-            pass
-    if period == 'tomorrow':
-        return today + timedelta(days=1), 'amanhã'
-    if period == 'today' or not period:
-        return today, 'hoje'
-    return None, period
-
-
-def _occurs_on(item: dict[str, Any], target_date) -> datetime | None:
-    zone = tz(item.get('timezone') or DEFAULT_TZ)
-    start = datetime(target_date.year, target_date.month, target_date.day, 0, 0, tzinfo=zone)
-    end = start + timedelta(days=1)
-    cursor = int(start.timestamp()) - 1
-    for _ in range(200):
-        ts = compute_next(item.get('recurrence') or {}, cursor, item.get('timezone') or DEFAULT_TZ)
-        if ts is None:
-            return None
-        dt = datetime.fromtimestamp(int(ts), zone)
-        if dt >= end:
-            return None
-        if dt >= start:
-            return dt
-        cursor = int(ts)
-    return None
-
-
 def _list_schedules(target: dict[str, Any]) -> str:
     rows = _schedule_matches({**target, 'scope': 'all' if target.get('scope') == 'unknown' else target.get('scope')})
     filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
-    target_date, label = _target_day(filters)
-    listed: list[tuple[datetime | None, dict[str, Any]]] = []
-    for item in rows:
-        occurrence = _occurs_on(item, target_date) if target_date else None
-        if target_date and occurrence is None:
-            continue
-        listed.append((occurrence, item))
-    listed.sort(key=lambda pair: pair[0] or datetime.max.replace(tzinfo=tz(DEFAULT_TZ)))
-    if not listed:
-        return f'Não há itens ativos para {label}.' if target_date else 'Não há itens ativos na agenda.'
-    lines = [f'📅 Agenda — {label}' if target_date else '📅 Agenda ativa']
-    seen: set[str] = set()
-    for occurrence, item in listed[:30]:
-        key = str(item.get('id') or '')
-        if key in seen:
-            continue
-        seen.add(key)
-        recurrence = item.get('recurrence') or {}
-        when = humanize(recurrence)
-        time_text = occurrence.strftime('%H:%M') if occurrence else ''
-        prefix = f'{time_text} — ' if time_text and recurrence.get('freq') == 'once' else ''
-        lines.append(f"- {prefix}{_label(item)} — {when} [ID {item.get('id')}]")
+    start, end, label = _date_range(filters)
+    if start is not None and end is not None:
+        return overview_range(start, end, label)
+    if not rows:
+        return 'Não há itens ativos na agenda.'
+    lines = ['📅 Agenda ativa']
+    for item in rows[:30]:
+        lines.append(f"- {_label(item)} — {humanize(item.get('recurrence') or {})} [ID {item.get('id')}]")
     return '\n'.join(lines)
 
 
 def _list_tasks(target: dict[str, Any]) -> str:
     filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
-    target_date, label = _target_day(filters)
+    start, end, label = _date_range(filters)
     rows = list_tasks(status='todo')
-    if target_date:
+    if start is not None and end is not None:
         selected: list[dict[str, Any]] = []
         for item in rows:
             due = str(item.get('due') or '').strip()
             if not due:
                 continue
             try:
-                if datetime.fromisoformat(due).date() == target_date:
+                due_date = datetime.fromisoformat(due).date()
+                if start <= due_date <= end:
                     selected.append(item)
             except Exception:
                 continue
         rows = selected
     if not rows:
-        return f'Nenhuma tarefa para {label}.' if target_date else 'Nenhuma tarefa pendente.'
-    lines = [f'✅ Tarefas — {label}' if target_date else '✅ Tarefas pendentes']
+        return f'Nenhuma tarefa para {label}.' if start is not None else 'Nenhuma tarefa pendente.'
+    lines = [f'✅ Tarefas — {label}' if start is not None else '✅ Tarefas pendentes']
     for item in rows[:30]:
         lines.append(f"- {item.get('title')} [ID {item.get('id')}]")
     return '\n'.join(lines)
@@ -275,14 +305,14 @@ def _create_schedule_from_decision(decision: dict[str, Any], original_text: str)
 
 def _create_task_from_decision(decision: dict[str, Any], original_text: str) -> str | None:
     target = decision.get('target') if isinstance(decision.get('target'), dict) else {}
-    title = str(target.get('reference') or '').strip()
+    title = str(target.get('reference') or '').strip() or str(original_text or '').strip()
     if not title:
         return None
     due = None
     parsed = parse(str(decision.get('standalone_request') or original_text)) or parse(original_text)
     if parsed and parsed.get('next_run_at'):
         due = datetime.fromtimestamp(int(parsed['next_run_at']), tz(parsed.get('timezone') or DEFAULT_TZ)).isoformat()
-    task = create_task(title, due=due, kind='action', metadata={'semantic_source': True})
+    task = create_task(title[:180], due=due, kind='action', metadata={'semantic_source': True})
     return f"✅ Criei a tarefa: {task.get('title')} [ID {task.get('id')}]"
 
 
@@ -366,8 +396,12 @@ def execute(decision: dict[str, Any] | None, original_text: str = '') -> str | N
 
     if entity == 'day' and action in {'list', 'status', 'answer'}:
         filters = target.get('filters') if isinstance(target.get('filters'), dict) else {}
-        period = str(filters.get('period') or 'today').casefold()
-        return day_overview('tomorrow' if period == 'tomorrow' else 'today')
+        start, end, label = _date_range(filters)
+        if start is None or end is None:
+            today = datetime.now(tz(DEFAULT_TZ)).date()
+            start = end = today
+            label = 'hoje'
+        return overview_range(start, end, label)
 
     if route == 'time':
         if action == 'create':

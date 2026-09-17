@@ -19,7 +19,7 @@ from intent_executor import execute as execute_intent
 from memory_router import handle as handle_memory_command
 from memory_vault import append_daily, retrieve as retrieve_memory, sync_state_snapshots
 from mission_router import handle as handle_mission_command
-from semantic_provider import llm as semantic_llm
+from semantic_provider import classify as semantic_classify
 from semantic_resilience import safe_read_fallback
 from telemetry import emit, trace_id
 from universal_router import handle as handle_universal_command
@@ -29,7 +29,7 @@ _original_llm = hermes_core.llm
 
 def _is_timeout_error(exc: Exception) -> bool:
     text = str(exc).casefold()
-    return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout', 'semantic provider unavailable'))
+    return any(k in text for k in ('timed out', 'timeout', 'readtimeout', 'pooltimeout', 'semantic provider unavailable', 'circuit open'))
 
 
 def _retry_small(prompt: str, system: str) -> str | None:
@@ -159,10 +159,10 @@ def _capability_reply(route: str, standalone: str) -> str | None:
 
 
 def _brain_dispatch(text: str) -> tuple[str | None, str, dict | None]:
-    context = recent_conversation(limit=6, max_chars=1800)
+    context = recent_conversation(limit=4, max_chars=700)
     started = time.perf_counter()
     try:
-        decision = brain_decide(text, context, semantic_llm)
+        decision = brain_decide(text, context, semantic_classify)
     except Exception as exc:
         emit(
             'core.brain', ok=False, route='unknown', action='none', reason='brain_exception',
@@ -240,9 +240,6 @@ def ask(text: str) -> str:
             reply = safe_reply
             route_name = 'safe_read_resilience'
 
-    # Se o cérebro semântico não conseguiu classificar, não fazemos uma segunda
-    # espera longa no LLM geral. Isso evita transformar um SLA de poucos segundos
-    # em 30-60 segundos de bloqueio. Consultas locais já tiveram chance no fallback.
     if reply is None and route_name == 'semantic_unavailable':
         reply = 'O cérebro semântico não respondeu a tempo. Não executei nenhuma ação para evitar fazer algo errado.'
         route_name = 'semantic_unavailable_fast'
@@ -263,7 +260,7 @@ def ask(text: str) -> str:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print('Hermes Core v6.4 — Fast Semantic Brain + Structured Executors', flush=True)
+        print('Hermes Core v6.5 — Compact Local Intent Classifier + Structured Executors', flush=True)
         return 0
     try:
         print(ask(' '.join(sys.argv[1:])), flush=True)

@@ -1,151 +1,144 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from typing import Any, Callable
 
-from daily_agent_contract import SYSTEM
+from temporal_query import resolve_temporal_range
 from time_store import DEFAULT_TZ, tz
 
-_ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
-_ALLOWED_ROUTES = {
-    'time', 'task', 'automation', 'finance', 'research', 'developer', 'devops',
-    'memory', 'mission', 'connected', 'assistant', 'chat',
+_ACTIONS = {
+    'L': 'list', 'C': 'create', 'R': 'remove', 'U': 'update', 'P': 'pause',
+    'V': 'resume', 'X': 'run', 'D': 'complete', 'G': 'reschedule', 'N': 'answer',
+    'H': 'search', 'S': 'status',
 }
-_ALLOWED_ACTIONS = {
-    'none', 'create', 'list', 'status', 'update', 'remove', 'pause',
-    'resume', 'run', 'answer', 'search', 'execute', 'continue', 'complete', 'reschedule',
+_ENTITIES = {
+    'A': 'day', 'M': 'reminder', 'L': 'alert', 'E': 'event', 'C': 'commitment',
+    'R': 'routine', 'T': 'task', 'S': 'schedule', 'O': 'unknown',
 }
-_ALLOWED_SCOPES = {'single', 'selection', 'all', 'filtered', 'unknown'}
-_ALLOWED_ENTITIES = {
-    'day', 'routine', 'reminder', 'alert', 'event', 'commitment', 'schedule',
-    'task', 'automation', 'unknown',
+_SCOPES = {'1': 'single', 'A': 'all', 'F': 'filtered', 'P': 'selection', 'U': 'unknown'}
+_MODES = {'Q': 'query', 'A': 'action', 'F': 'followup', 'C': 'chat'}
+_ROUTES = {
+    'T': 'time', 'K': 'task', 'U': 'automation', 'S': 'assistant', 'W': 'research',
+    'D': 'developer', 'O': 'devops', 'M': 'memory', 'F': 'finance', 'C': 'chat',
 }
+_MUTATING = {'create', 'update', 'remove', 'pause', 'resume', 'run', 'complete', 'reschedule'}
 
 
-def _extract_json(raw: str) -> dict[str, Any] | None:
-    text = str(raw or '').strip()
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except Exception:
-        pass
-    match = re.search(r'\{.*\}', text, re.DOTALL)
+def _parse_label(raw: str) -> tuple[str, str, str, str, str] | None:
+    text = str(raw or '').upper().strip()
+    match = re.search(r'([LCRUPVXDGHNS])\s*\|\s*([AMLECRTSO])\s*\|\s*([1AFPU])\s*\|\s*([QAFC])\s*\|\s*([TKUSWDOMFC])', text)
     if not match:
         return None
-    try:
-        data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+    return tuple(match.groups())  # type: ignore[return-value]
 
 
-def _clean(value: Any, limit: int = 900) -> str:
-    return re.sub(r'\s+', ' ', str(value or '')).strip()[:limit]
-
-
-def _to_int(value: Any) -> int | None:
-    try:
-        return int(value) if value is not None and str(value).strip() != '' else None
-    except Exception:
-        return None
-
-
-def _pick(data: dict[str, Any], long_key: str, short_key: str, default: Any = None) -> Any:
-    if long_key in data:
-        return data.get(long_key)
-    return data.get(short_key, default)
-
-
-def _validate(data: dict[str, Any], current: str) -> dict[str, Any] | None:
-    mode = _clean(_pick(data, 'mode', 'm')).casefold()
-    route = _clean(_pick(data, 'route', 'r')).casefold()
-    action = _clean(_pick(data, 'action', 'a')).casefold() or 'none'
-    entity = _clean(_pick(data, 'entity', 'e')).casefold() or 'unknown'
-    scope = _clean(_pick(data, 'scope', 's')).casefold() or 'unknown'
-    reference = _clean(_pick(data, 'reference', 'ref'), 360)
-    response = _clean(_pick(data, 'response', 'resp'), 1200)
-    rewritten = _clean(_pick(data, 'standalone_request', 'q'), 900) or current
-    confidence = _pick(data, 'confidence', 'c', 0.0)
-
-    try:
-        confidence = max(0.0, min(1.0, float(confidence)))
-    except Exception:
-        confidence = 0.0
-
-    if mode not in _ALLOWED_MODES or route not in _ALLOWED_ROUTES or action not in _ALLOWED_ACTIONS:
-        return None
-    if entity not in _ALLOWED_ENTITIES:
-        entity = 'unknown'
-    if scope not in _ALLOWED_SCOPES:
-        scope = 'unknown'
-
-    mutating = action in {'create', 'update', 'remove', 'pause', 'resume', 'run', 'execute', 'complete', 'reschedule'}
-    if mutating and mode not in {'action', 'followup'}:
-        return None
-
+def _temporal_filters(text: str) -> dict[str, Any]:
     filters: dict[str, Any] = {}
-    period = _clean(_pick(data, 'period', 'p'), 40).casefold()
-    if period and period != 'unknown':
-        filters['period'] = period
+    period = resolve_temporal_range(text)
+    if period is not None:
+        today = datetime.now(tz(DEFAULT_TZ)).date()
+        if period.start == period.end:
+            filters['date'] = period.start.isoformat()
+            if period.start == today:
+                filters['period'] = 'today'
+            elif period.start == today.fromordinal(today.toordinal() + 1):
+                filters['period'] = 'tomorrow'
+        else:
+            label = period.label.casefold()
+            if 'semana que vem' in label:
+                filters['period'] = 'next_week'
+            elif 'esta semana' in label:
+                filters['period'] = 'this_week'
+            elif 'mês que vem' in label:
+                filters['period'] = 'next_month'
+            elif 'este mês' in label:
+                filters['period'] = 'this_month'
+            filters['date_start'] = period.start.isoformat()
+            filters['date_end'] = period.end.isoformat()
 
-    date = _clean(_pick(data, 'date', 'd'), 40)
-    hour = _to_int(_pick(data, 'hour', 'h'))
-    minute = _to_int(_pick(data, 'minute', 'n'))
-    if date:
-        filters['date'] = date
-    if hour is not None:
-        filters['hour'] = hour
-    if minute is not None:
-        filters['minute'] = minute
+    # Extração objetiva de horário; não participa da decisão de intenção.
+    hour_match = re.search(r'(?<!\d)([01]?\d|2[0-3])(?:[:h](\d{2}))?\s*h?\b', text.casefold())
+    if hour_match:
+        filters['hour'] = int(hour_match.group(1))
+        filters['minute'] = int(hour_match.group(2) or 0)
+    return filters
 
-    raw_ids = _pick(data, 'ids', 'i', [])
-    ids = raw_ids if isinstance(raw_ids, list) else []
-    clean_ids: list[str] = []
-    for value in ids[:20]:
-        ref = _clean(value, 64)
-        if re.fullmatch(r'[0-9a-fA-F]{6,32}', ref):
-            clean_ids.append(ref)
+
+def _reference(text: str, entity: str, action: str, scope: str) -> str:
+    # O classificador decide intenção/entidade. Aqui só preservamos texto útil para
+    # criação ou busca filtrada; o executor e os parsers locais fazem o restante.
+    current = re.sub(r'\s+', ' ', str(text or '')).strip()
+    if not current:
+        return ''
+    if action == 'create' or entity == 'task':
+        return current[:360]
+    if scope in {'filtered', 'single'} and entity not in {'day', 'schedule'}:
+        return current[:360]
+    return ''
+
+
+def decide(text: str, recent_context: str, classifier: Callable[[str, str], str]) -> dict[str, Any] | None:
+    current = str(text or '').strip()
+    if not current:
+        return None
+
+    try:
+        raw = classifier(current, recent_context)
+    except Exception:
+        return None
+
+    parsed = _parse_label(raw)
+    if not parsed:
+        return None
+
+    action_code, entity_code, scope_code, mode_code, route_code = parsed
+    action = _ACTIONS[action_code]
+    entity = _ENTITIES[entity_code]
+    scope = _SCOPES[scope_code]
+    mode = _MODES[mode_code]
+    route = _ROUTES[route_code]
+
+    # Rotinas comuns são schedules locais; isso permite que create/list/remove/
+    # pause/resume usem o executor estruturado em vez do roteador legado.
+    if entity == 'routine' and action in {'create', 'list', 'status', 'remove', 'pause', 'resume', 'reschedule'}:
+        route = 'time'
+
+    if action in _MUTATING and mode not in {'action', 'followup'}:
+        return None
+
+    # Escopo desconhecido em mutação é deliberadamente bloqueado.
+    if action in _MUTATING and scope == 'unknown':
+        return {
+            'mode': 'chat',
+            'route': 'chat',
+            'action': 'answer',
+            'standalone_request': current,
+            'response': 'Preciso saber exatamente qual item você quer alterar.',
+            'confidence': 0.95,
+            'references_previous_turn': mode == 'followup',
+            'reason': 'ambiguous_mutation_scope',
+            'target': {'entity': entity, 'scope': scope, 'reference': '', 'ids': [], 'filters': {}},
+        }
+
+    filters = _temporal_filters(current)
+    reference = _reference(current, entity, action, scope)
 
     return {
         'mode': mode,
         'route': route,
         'action': action,
-        'standalone_request': rewritten,
-        'response': response,
-        'confidence': confidence,
-        'references_previous_turn': bool(_pick(data, 'references_previous_turn', 'prev', mode == 'followup')),
-        'reason': _clean(_pick(data, 'reason', 'why'), 180),
+        'standalone_request': current,
+        'response': '',
+        'confidence': 0.92,
+        'references_previous_turn': mode == 'followup',
+        'reason': 'compact_local_classifier',
         'target': {
             'entity': entity,
             'scope': scope,
             'reference': reference,
-            'ids': clean_ids,
+            'ids': [],
             'filters': filters,
         },
     }
-
-
-def _call_once(llm: Callable[..., str], prompt: str, system: str, max_tokens: int) -> dict[str, Any] | None:
-    try:
-        raw = llm(prompt, system=system, max_tokens=max_tokens)
-    except Exception:
-        return None
-    return _extract_json(raw)
-
-
-def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str, Any] | None:
-    current = str(text or '').strip()
-    if not current:
-        return None
-
-    recent = re.sub(r'\s+', ' ', str(recent_context or '')).strip()[-120:]
-    now = datetime.now(tz(DEFAULT_TZ)).strftime('%Y-%m-%d %H:%M')
-    prompt = f'N:{now}\nC:{recent or "-"}\nU:{current}\nJ:'
-
-    parsed = _call_once(llm, prompt, SYSTEM, 64)
-    return _validate(parsed, current) if parsed else None
