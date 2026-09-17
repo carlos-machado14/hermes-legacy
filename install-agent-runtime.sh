@@ -37,18 +37,23 @@ log "Atualizando Hermes Core..."
 chmod +x "$ROOT/install-core-v2.sh"
 "$ROOT/install-core-v2.sh"
 
+# O cérebro operacional usa um modelo local separado e minúsculo. Não usamos
+# OmniRoute, OpenAI ou qualquer outro provider remoto para classificação diária.
+if ! curl -fsS http://127.0.0.1:${HERMES_DAILY_AGENT_PORT:-8087}/health >/dev/null 2>&1; then
+  log "Daily Agent local não está ativo; instalando Qwen3 0.6B dedicado..."
+  chmod +x "$ROOT/install-daily-agent.sh"
+  "$ROOT/install-daily-agent.sh"
+else
+  log "Daily Agent local já está saudável."
+fi
+
 mkdir -p "$HERMES_HOME/plugins" "$HERMES_HOME/backups"
 
-# O manifest valido e gerenciado pelo proprio Hermes. Nao apagamos mais o
-# diretorio inteiro do plugin, pois isso remove metadados de discovery que o
-# `hermes plugins doctor` exige.
 if [ -d "$PLUGIN_DST" ]; then
   mkdir -p "$BACKUP"
   cp -a "$PLUGIN_DST/." "$BACKUP/" 2>/dev/null || true
 fi
 
-# Se a execucao anterior ja deixou o plugin invalido, recupera automaticamente o
-# backup mais recente que ainda passa no doctor antes de aplicar o novo codigo.
 if command -v hermes >/dev/null 2>&1 && ! plugin_valid "$PLUGIN_DST"; then
   log "Plugin atual sem manifest valido; procurando backup recuperavel..."
   RECOVERY="$(find_valid_backup || true)"
@@ -107,4 +112,5 @@ if grep -R -n -F 'Não consegui obter uma resposta confiável dentro do limite l
 fi
 
 log "Runtime sincronizado e manifest preservado."
+log "Daily Agent: Qwen3 0.6B local em 127.0.0.1:${HERMES_DAILY_AGENT_PORT:-8087}."
 log "Backup desta execucao: $BACKUP"
