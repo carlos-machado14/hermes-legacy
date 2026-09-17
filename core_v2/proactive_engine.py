@@ -5,8 +5,15 @@ from datetime import datetime
 
 from agent_state import get as get_agent_state, refresh as refresh_agent_state
 from context_builder import snapshot, primary_goal, ranked_tasks
+from day_overview import overview as day_overview
 from decision_log import record, summary as decisions_summary
+from temporal_parser import norm
 from time_router import agenda
+
+
+def _looks_like_legacy_reminder_task(title: str) -> bool:
+    t = norm(title)
+    return any(x in t for x in ('me avisa ', 'me avise ', 'me lembra ', 'me lembre '))
 
 
 def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -15,6 +22,8 @@ def _task_bucket(tasks: list[dict]) -> tuple[list[dict], list[dict], list[dict]]
     overdue: list[dict] = []
     other: list[dict] = []
     for task in tasks:
+        if _looks_like_legacy_reminder_task(str(task.get('title') or '')):
+            continue
         due = str(task.get('due') or '').strip()
         if not due:
             other.append(task)
@@ -46,21 +55,7 @@ def daily_brief() -> str:
     due_today, overdue, other = _task_bucket(tasks)
     focus = due_today + overdue + other
 
-    out: list[str] = []
-    try:
-        out.append(agenda('today'))
-    except Exception:
-        out.append('📅 Não consegui carregar sua agenda agora.')
-
-    out.extend(['', '📌 O que precisa da sua atenção'])
-    if overdue:
-        for task in overdue[:4]:
-            out.append(f"- Atrasada: {task.get('title')} [ID {task.get('id')}]")
-    if due_today:
-        for task in due_today[:5]:
-            out.append(f"- Hoje: {task.get('title')} [ID {task.get('id')}]")
-    if not overdue and not due_today:
-        out.append('- Nenhuma tarefa com prazo hoje ou atrasada.')
+    out: list[str] = [day_overview('today')]
 
     next_task = _next_step(focus)
     if next_task:
@@ -70,15 +65,15 @@ def daily_brief() -> str:
     open_loops = list(state.get('open_loops') or [])
     non_task_loops = [x for x in open_loops if x.get('type') != 'task']
     if non_task_loops:
-        out.extend(['', '🧠 Pendências que estou acompanhando'])
-        for item in non_task_loops[:4]:
+        out.extend(['', '🧠 Estou acompanhando'])
+        for item in non_task_loops[:3]:
             out.append(f"- {item.get('title') or item.get('type')}")
 
     if goal:
-        out.extend(['', f"🏁 Objetivo em andamento: {goal.get('title')} — {goal.get('progress',0)}%"])
+        out.extend(['', f"🏁 Objetivo: {goal.get('title')} — {goal.get('progress',0)}%"])
 
     if not focus and not non_task_loops:
-        out.extend(['', 'Seu dia está sem pendências operacionais relevantes no momento.'])
+        out.extend(['', 'Sem pendências operacionais relevantes agora.'])
     return '\n'.join(out)
 
 
@@ -95,14 +90,15 @@ def weekly_review() -> str:
             out.append(f"- Objetivo: {g.get('title')} | progresso={g.get('progress',0)}% | prazo={g.get('deadline') or 'não definido'}")
     else:
         out.append('- Nenhum objetivo ativo.')
-    out.append(f'- Tarefas abertas: {len(tasks)}')
+    out.append(f'- Tarefas abertas: {len(due_today) + len(overdue) + len(other)}')
     out.append(f'- Atrasadas: {len(overdue)}')
     out.append(f'- Para hoje: {len(due_today)}')
     pending = list(state.get('pending_decisions') or [])
     if pending:
         out.append(f'- Decisões pendentes: {len(pending)}')
-    if tasks:
-        out.append(f"- Próximo passo recomendado: {tasks[0].get('title')}")
+    if due_today or overdue or other:
+        next_task = (due_today + overdue + other)[0]
+        out.append(f"- Próximo passo: {next_task.get('title')}")
     try:
         out.extend(['', agenda('week')])
     except Exception:
@@ -112,18 +108,18 @@ def weekly_review() -> str:
 
 def recommendation() -> str:
     refresh_agent_state()
-    state = get_agent_state()
     ctx = snapshot()
     goal = primary_goal(ctx)
     tasks = ranked_tasks(ctx)
-    overdue = [x for x in list(state.get('open_loops') or []) if x.get('status') == 'overdue']
+    due_today, overdue, other = _task_bucket(tasks)
+    focus = due_today + overdue + other
     out=['Minha leitura do momento:']
     if overdue:
-        out.append(f"- Existem {len(overdue)} pendência(s) atrasada(s) que merecem atenção primeiro.")
+        out.append(f"- Existem {len(overdue)} pendência(s) atrasada(s).")
     if goal:
         out.append(f"- Objetivo ativo: {goal.get('title')}.")
-    if tasks:
-        out.append(f"- Próxima ação concreta: {tasks[0].get('title')}.")
+    if focus:
+        out.append(f"- Próxima ação concreta: {focus[0].get('title')}.")
     else:
         out.append('- Não há tarefa concreta aberta; vale definir o próximo passo do objetivo principal.')
     return '\n'.join(out)
@@ -131,7 +127,7 @@ def recommendation() -> str:
 
 def continue_last() -> str:
     state = get_agent_state(refresh_state=True)
-    actions = list(state.get('next_actions') or [])
+    actions = [x for x in list(state.get('next_actions') or []) if not _looks_like_legacy_reminder_task(str(x.get('title') or ''))]
     if actions:
         return f"Vamos continuar por: {actions[0].get('title')}."
     from decision_log import recent
