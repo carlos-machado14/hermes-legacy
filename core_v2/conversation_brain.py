@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Any, Callable
 
+from daily_agent_examples import select_examples
 from time_store import DEFAULT_TZ, tz
 
 _ALLOWED_MODES = {'chat', 'query', 'action', 'followup'}
@@ -134,27 +135,30 @@ def decide(text: str, recent_context: str, llm: Callable[..., str]) -> dict[str,
     if not current:
         return None
 
-    # Primeira decisão é propositalmente independente do catálogo/estado completo.
-    # O executor consulta o estado real depois da classificação. Isso evita gastar
-    # o SLA do modelo local lendo dezenas de itens antes de entender a intenção.
-    recent = str(recent_context or '')[-500:]
+    # The tiny agent only understands intent. State lookup and execution happen later.
+    recent = str(recent_context or '')[-700:]
     now = datetime.now(tz(DEFAULT_TZ)).isoformat(timespec='minutes')
+    examples = select_examples(current, limit=7)
 
     system = (
         '/no_think\n'
-        'Interprete semanticamente a mensagem. Responda SOMENTE JSON, sem markdown. '
-        'Pergunta nunca vira mutação. Não dependa de palavras-chave. '
-        'Campos: mode,route,action,entity,scope,reference,period,date,hour,minute,'
-        'references_previous_turn,confidence,response,reason. '
-        'mode=chat|query|action|followup. '
-        'route=time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat. '
-        'action=none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule. '
-        'entity=day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown. '
-        'scope=single|selection|all|filtered|unknown. '
-        'period use today,tomorrow,this_week,next_week,this_month,next_month quando couber. '
-        'Se faltar informação indispensável para agir, route=chat action=answer e response pergunta só o necessário.'
+        'Você é o agente operacional diário do Hermes. Classifique intenção e extraia tempo/contexto. '
+        'Retorne SOMENTE um JSON compacto, sem markdown nem explicação. '
+        'Nunca transforme pergunta em ação. Nunca invente IDs. Se uma ação estiver ambígua, peça o dado faltante em response. '
+        'Assuntos simples de agenda/tarefa/rotina ficam em time/task/automation; pesquisa, código, explicação ou conversa geral devem ser delegados. '
+        'Para delegar use a route adequada e action=answer/search, deixando response vazio. '
+        'Campos: mode,route,action,entity,scope,reference,period,date,hour,minute,references_previous_turn,confidence,response,reason,standalone_request. '
+        'mode=chat|query|action|followup; route=time|task|automation|finance|research|developer|devops|memory|mission|connected|assistant|chat; '
+        'action=none|create|list|status|update|remove|pause|resume|run|answer|search|execute|continue|complete|reschedule; '
+        'entity=day|routine|reminder|alert|event|commitment|schedule|task|automation|unknown; scope=single|selection|all|filtered|unknown; '
+        'period=today|tomorrow|this_week|next_week|this_month|next_month quando aplicável.'
     )
-    prompt = f'AGORA:{now}\nCONTEXTO:{recent or "-"}\nMENSAGEM:{current}'
+    prompt = (
+        f'AGORA:{now}\n'
+        f'EXEMPLOS:\n{examples}\n'
+        f'CONTEXTO:{recent or "-"}\n'
+        f'MENSAGEM:{current}'
+    )
 
-    parsed = _call_once(llm, prompt, system, 96)
+    parsed = _call_once(llm, prompt, system, 128)
     return _validate(parsed, current) if parsed else None
