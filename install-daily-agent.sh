@@ -73,6 +73,26 @@ if [ -z "$LLAMA_SERVER" ]; then
   exit 2
 fi
 
+# Qwen3 entra em modo de reasoning por padrão em vários templates do llama.cpp.
+# Para o classificador diário isso é desperdício e, com saída curta, fazia a API
+# devolver somente '<think>'. Detectamos os flags suportados pelo binário instalado
+# e desligamos reasoning no próprio servidor. Isso continua 100% local.
+HELP="$($LLAMA_SERVER --help 2>&1 || true)"
+REASONING_ARGS=""
+if printf '%s' "$HELP" | grep -q -- '--reasoning-budget'; then
+  REASONING_ARGS="$REASONING_ARGS --reasoning-budget 0"
+fi
+if printf '%s' "$HELP" | grep -q -- '--reasoning '; then
+  REASONING_ARGS="$REASONING_ARGS --reasoning off"
+elif printf '%s' "$HELP" | grep -q -- '-rea,'; then
+  REASONING_ARGS="$REASONING_ARGS -rea off"
+fi
+if [ -z "$REASONING_ARGS" ]; then
+  log "AVISO: este llama-server não expõe flags de reasoning; /no_think ficará como fallback."
+else
+  log "Reasoning do Daily Agent será desativado:${REASONING_ARGS}"
+fi
+
 mkdir -p "$SYSTEMD_USER" "$ENV_DIR" "$HERMES_HOME/core-v2/state" "$MODEL_DIR"
 
 if [ -s "$MODEL_FILE" ]; then
@@ -125,7 +145,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${LLAMA_SERVER} -m ${MODEL_FILE} --host 127.0.0.1 --port ${PORT} -c ${CTX} -t ${THREADS} -np 1
+ExecStart=${LLAMA_SERVER} -m ${MODEL_FILE} --host 127.0.0.1 --port ${PORT} -c ${CTX} -t ${THREADS} -np 1${REASONING_ARGS}
 Restart=always
 RestartSec=3
 Environment=HOME=${HOME}

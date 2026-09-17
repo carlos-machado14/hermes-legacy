@@ -19,9 +19,6 @@ _ENV_FILES = [
 _DEFAULT_BASE_URL = 'http://127.0.0.1:8087/v1'
 _DEFAULT_MODEL = 'Qwen3-0.6B-Q4_0.gguf'
 
-# O modelo pequeno não gera mais um JSON inteiro. Ele só escolhe cinco códigos.
-# Isso reduz brutalmente prompt/output e deixa datas, referências e execução para
-# código local determinístico.
 _CLASSIFIER_SYSTEM = '''/no_think
 Classifique a intenção em PT-BR. Responda SOMENTE A|E|S|M|R.
 A ação: L=listar C=criar R=remover U=alterar P=pausar V=retomar X=executar D=concluir G=reagendar N=responder H=buscar S=status.
@@ -105,7 +102,7 @@ def _timeout_seconds() -> float:
 
 
 def classify(text: str, recent_context: str = '') -> str:
-    """Classifica intenção com saída de poucos tokens, sempre no modelo local."""
+    """Classifica intenção com saída mínima, sempre no modelo local."""
     if _circuit_open():
         raise TimeoutError('daily local semantic agent circuit open')
 
@@ -117,11 +114,14 @@ def classify(text: str, recent_context: str = '') -> str:
         'model': model,
         'messages': [
             {'role': 'system', 'content': _CLASSIFIER_SYSTEM},
-            {'role': 'user', 'content': f'C:{recent or "-"}\nU:{current}\nR:'},
+            {'role': 'user', 'content': f'/no_think\nC:{recent or "-"}\nU:{current}\nR:'},
         ],
         'temperature': 0,
         'max_tokens': 12,
         'stop': ['\n'],
+        # Builds antigos do llama.cpp/Qwen3 respeitam o kwarg por request;
+        # builds novos usam os flags do servidor definidos pelo instalador.
+        'chat_template_kwargs': {'enable_thinking': False},
     }
     timeout = httpx.Timeout(connect=1.0, read=timeout_seconds, write=timeout_seconds, pool=1.0)
     started = time.perf_counter()
@@ -130,10 +130,18 @@ def classify(text: str, recent_context: str = '') -> str:
             response = client.post(f'{base_url}/chat/completions', json=payload)
             response.raise_for_status()
             data = response.json()
-        result = str((((data.get('choices') or [{}])[0].get('message') or {}).get('content')) or '').strip()
+        message = ((data.get('choices') or [{}])[0].get('message') or {})
+        result = str(message.get('content') or '').strip()
         elapsed_ms = (time.perf_counter() - started) * 1000
         if not result:
+            reasoning = str(message.get('reasoning_content') or '').strip()
+            if reasoning:
+                raise RuntimeError('daily classifier returned reasoning only')
             raise RuntimeError('daily classifier returned empty content')
+        if '<think' in result.casefold() or result.casefold().startswith('think'):
+            raise RuntimeError('daily classifier thinking mode is still enabled')
+        if not re.search(r'[LCRUPVXDGHNS]\s*\|', result.upper()):
+            raise RuntimeError(f'daily classifier invalid label: {result[:80]}')
         _mark_success(elapsed_ms)
         emit('brain.provider', ok=True, provider=provider_kind, model=model, elapsed_ms=elapsed_ms,
              prompt_chars=len(current) + len(recent), output_chars=len(result), mode='label_classifier')
@@ -147,7 +155,6 @@ def classify(text: str, recent_context: str = '') -> str:
 
 
 def llm(prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
-    """Compatibilidade com probes antigos. O brain novo usa classify()."""
     return classify(prompt, '')
 
 
