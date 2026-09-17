@@ -7,6 +7,7 @@ import time
 from semantic_provider import classify, health
 
 CASES = [
+    'quais sao minhas rotinas',
     'cancela todos meus compromissos da agenda vamos resetar ela',
     'qual minha agenda para sábado',
     'me lembra amanhã às 10h de revisar o Hermes',
